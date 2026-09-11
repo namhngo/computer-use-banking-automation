@@ -29,7 +29,7 @@ taxonomy, and the HITL seam.
 | 4 | Target application unspecified | Owning the target is what makes error-injection evidence possible | §2.3: local legacy-style mock app with fault injection |
 | 5 | Schema missing per-step postconditions, stable step IDs, app identity, provenance, approval, sensitivity flags, extraction parsing | Needed for tenant overrides, redaction, reviewability | §3 |
 | 6 | HITL "same live session" mechanism and "record what the human did" not concrete | Graded as "not just a TODO" | §7 |
-| 7 | Capability-router agent presented as core | It's stretch goal #1 in the brief; risk of spending time before core is done | §10: build last |
+| 7 | Capability-router agent presented as core, with no explicit discover/replay entrypoints | Brief requires explicit "run the agent on a goal, then replay the artifact" commands; fault-injection evidence needs direct replay. Router is stretch goal #1 | §1.4 / §10: keep explicit `discover` + `replay`; add `run --goal` router as the agent entrypoint, built after core (Phase 7) |
 
 ---
 
@@ -45,6 +45,12 @@ paths share the same surface adapter and policy layer but never share a decision
                  Natural-language goal + target
                               │
                               ▼
+                 ┌─────────────────────────┐
+                 │  Capability Agent (LLM) │   one tool-calling turn:
+                 │  `run --goal`           │   find_capabilities → execute | discover
+                 └──────┬───────────┬──────┘
+          no match      │           │  match
+                        ▼           │
                  ┌─────────────────────────┐
                  │  Discovery Agent (LLM)  │   observe → decide → act, bounded
                  └────────────┬────────────┘
@@ -64,7 +70,7 @@ paths share the same surface adapter and policy layer but never share a decision
                  │  Capability Registry    │   versioned JSON on disk
                  └────────────┬────────────┘
                               │
-      AI agent / CLI ─────────┤ execute(name, inputs)
+   Capability Agent / CLI ────┤ execute(name, inputs)
                               ▼
                  ┌─────────────────────────┐
                  │  Replay Engine          │   no LLM; locator ladder, waits,
@@ -84,6 +90,19 @@ All browser actions — from discovery *and* replay — flow through one `Surfac
 interface, and every action is checked by the `PolicyLayer` before the adapter executes it.
 That single choke point is what makes the safety story credible: the LLM cannot bypass policy
 because it never touches Playwright directly.
+
+### 1.4 Two entrypoints, one pipeline
+
+| Entrypoint | Who uses it | What it does |
+|---|---|---|
+| `pnpm run --goal "..."` | The agent-facing demo; what a calling AI agent would do | LLM router: `find_capabilities(goal)` → if a match with satisfiable inputs, `execute_capability(name, inputs)`; else `discover(goal)` then execute. One tool-calling turn, no UI reasoning. |
+| `pnpm discover` / `pnpm replay` | Developers, reviewers, evidence generation | Direct access to each pipeline stage. Required by the brief's README demo path ("run the agent on a goal, then replay the resulting artifact") and needed for fault-injection runs with controlled inputs. |
+
+The router is deliberately thin: it never sees the UI, never chooses locators, never decides
+steps. It only maps *goal → capability + typed inputs*. If it picks wrong, the replay engine's
+input validation rejects the call before any browser action happens. Its LLM call is a
+**routing** decision, not a **UI** decision, so the "no LLM in the production execution path"
+property of replay still holds — and the write-up should say so explicitly.
 
 ### 1.2 Boundaries (single process, justified)
 
@@ -105,7 +124,8 @@ src/
   hitl/           control-transfer state machine, intervention store, HTTP endpoints,
                   human-action recorder
   evidence/       structured JSONL event log, screenshot capture, redaction
-  cli/            discover, replay, list, serve-operator
+  agent/          capability router: find_capabilities / execute_capability / discover tools
+  cli/            run (router), discover, replay, list, serve-operator
 mock-app/         local legacy-style credit-union back-office (the target surface)
 evidence/         committed runs: discovery, replay-success, replay-business-outcome,
                   replay-failure, hitl
@@ -537,8 +557,8 @@ web adapter only in frame handling (`frameLocator` traversal on resolve) and in 
 
 **Build:** mock app with fault injection; discovery agent (real LLM run); compiler +
 verification replay; replay engine with ladder, detectors, result contract; policy layer;
-HITL state machine + HTTP + headed handoff + human-action capture; evidence; tests where it
-counts; README + REPORT.
+HITL state machine + HTTP + headed handoff + human-action capture; evidence; capability
+router (`run --goal`) as the agent-facing entrypoint; tests where it counts; README + REPORT.
 
 **Mock / declare only:** operator UI (curl + static page), `visual` strategy, desktop adapter,
 tenant override merging (schema + one unit test, no second app variant unless time allows),
@@ -560,15 +580,26 @@ one has a passing demo.
 | **4. Discovery agent** (1 day) | intent extraction, a11y snapshot with refs, tools, bounded loop, transcript recorder | One real LLM run completes the balance goal against the mock app; transcript + events saved |
 | **5. Compiler + verification** (½–1 day) | transcript → draft artifact; verification replay; status transitions | Discovered artifact ≈ hand-written one; verification replay passes; `status: verified` |
 | **6. HITL** (½–1 day) | state machine, intervention store, HTTP endpoints, headed handoff, human-action capture, resume semantics | Demo: replay with `unexpected_confirm` fault → NEEDS_HUMAN → operator clicks in the live window → `resume retry_step` → SUCCESS, with human actions in evidence |
-| **7. Evidence set + docs** (½–1 day) | committed `evidence/` runs, `README.md` (setup, demo commands, offline mode), `REPORT.md` (seven exact headings) | A stranger can clone, run discovery, run replay, trigger HITL from README alone |
-| **8. Stretch** (only if 0–7 solid) | capability catalog as tool-calling surface (the "capability agent" from the original draft) *or* second app variant with tenant overrides | One shown end-to-end |
+| **7. Capability router** (½ day) | `run --goal`: one `generateText` turn with tools `find_capabilities`, `execute_capability`, `discover`; registry search by name/description; input extraction from goal | Cold run (empty registry) discovers then executes; warm run with a new member ID replays directly with no discovery. Both in evidence |
+| **8. Evidence set + docs** (½–1 day) | committed `evidence/` runs, `README.md` (setup, demo commands, offline mode), `REPORT.md` (seven exact headings) | A stranger can clone, run `run --goal`, run discovery, run replay, trigger HITL from README alone |
+| **9. Stretch** (only if 0–8 solid) | second app variant with tenant overrides *or* multi-run stability score | One shown end-to-end |
 
 Estimated total: **5–7 focused days**. Time-box at 7 and document the remainder as next steps.
+Phase 7 is small because it only composes pieces from Phases 3–5; if it threatens the
+time-box, it is the first thing to cut back to "explicit commands only."
 
 ### 10.3 Demo path (target for README)
 
 ```bash
 pnpm mock-app                                                   # terminal 1
+
+# Agent-facing path: one goal, the router decides
+pnpm run --goal "look up member 12345 and read their current savings balance"
+#   cold: no capability → discover → compile → verify → execute → { savingsBalance: 1234.56 }
+pnpm run --goal "look up member 67890 and read their current savings balance"
+#   warm: routes to get_member_savings_balance → replay only, no discovery, no UI reasoning
+
+# Explicit path: each stage on its own (required by brief; used for evidence + fault injection)
 pnpm discover --goal "look up member 12345 and read their current savings balance" \
               --target http://localhost:4000                    # real LLM run → artifact
 pnpm replay get_member_savings_balance --input memberId=12345   # SUCCESS
