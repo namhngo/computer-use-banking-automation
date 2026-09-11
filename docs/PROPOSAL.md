@@ -4,6 +4,11 @@
 > against the brief; **[NEW]** sections were missing entirely. Rationale for each change is inline
 > so the reasoning can be lifted into `REPORT.md` later.
 
+**Implementation status:** Phase 0 completed on 2026-09-11. `pnpm check` passes lint,
+strict typechecking, 19 configuration tests, and one offline Chromium smoke test.
+`pnpm config:check` and frozen-lockfile installation also pass. See `README.md` for runnable
+setup commands. Phases 1 onward are still planned; no real discovery evidence exists yet.
+
 ---
 
 ## 0. Assessment summary

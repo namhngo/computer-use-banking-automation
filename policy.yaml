@@ -1,0 +1,8 @@
+# Design template only. Parsing arrives in Phase 2; enforcement in Phase 3.
+# No browser action is authorized by this Phase 0 file.
+schemaVersion: 1
+defaultEffect: deny
+allowedOrigins: []
+allowedRoutes: []
+allowedActions: []
+irreversibleActions: block

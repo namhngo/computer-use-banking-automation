@@ -1,0 +1,34 @@
+{
+  "name": "computer-use-banking-automation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local computer-use discovery and deterministic replay prototype",
+  "type": "module",
+  "packageManager": "pnpm@11.13.0",
+  "engines": {
+    "node": ">=22.13.0 <23",
+    "pnpm": "11.13.0"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --project unit",
+    "test:browser": "vitest run --project browser",
+    "browser:install": "playwright install chromium",
+    "config:check": "node --env-file-if-exists=.env --import tsx src/cli/check-config.ts",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:browser"
+  },
+  "dependencies": {
+    "playwright": "1.63.0",
+    "zod": "4.6.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.2",
+    "eslint": "10.10.0",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.0",
+    "vitest": "5.0.0"
+  }
+}

@@ -1,0 +1,25 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+
+# Local credentials and browser state must never become submission evidence.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+.auth/
+playwright/.auth/
+storage-state*.json
+storageState*.json
+
+# Generated runs are reviewed and sanitized before publication in evidence/.
+artifacts/
+test-results/
+playwright-report/
+blob-report/
+trace*.zip
+*.webm
