@@ -4,10 +4,11 @@
 > against the brief; **[NEW]** sections were missing entirely. Rationale for each change is inline
 > so the reasoning can be lifted into `REPORT.md` later.
 
-**Implementation status:** Phase 0 completed on 2026-09-11. `pnpm check` passes lint,
-strict typechecking, 19 configuration tests, and one offline Chromium smoke test.
-`pnpm config:check` and frozen-lockfile installation also pass. See `README.md` for runnable
-setup commands. Phases 1 onward are still planned; no real discovery evidence exists yet.
+**Implementation status:** Phases 0 and 1 completed on 2026-09-11. `pnpm check` passes lint,
+strict typechecking, 45 configuration/HTTP/CLI tests, and 13 Chromium tests (including desktop,
+mobile, iframe failure, session recovery, reset isolation, and both shutdown signals).
+See `README.md` for runnable setup, `pnpm mock-app`, environment configuration, and fault commands.
+Phases 2 onward are still planned; no real discovery or replay evidence exists yet.
 
 ---
 
@@ -191,6 +192,15 @@ problems" on purpose:
 - **Reset contract:** the test harness resets synthetic data and starts a fresh browser context
   at the declared entry point for verification. The agent still operates only the UI; it cannot
   call reset hooks or read fixture data. HITL, unlike verification, must retain the live session.
+- **Phase 1 implementation:** `mock-app/app.ts` exposes a factory and an in-process reset hook,
+  never an HTTP reset/data API. Requests carry a reset generation so old in-flight login/search
+  requests cannot issue new sessions or consume a subsequent run's faults. Fixtures are
+  immutable; faults are selected with `pnpm mock-app --fault <name>` or harness reset.
+- **Local credentials:** `pnpm mock-app` reads `MOCK_USERNAME` and `MOCK_PASSWORD` from an
+  ignored `.env` (shell values take precedence). Startup fails if they are absent or invalid;
+  the UI and logs never display them. The factory requires explicit credential injection so
+  tests remain hermetic with synthetic values. Credentials are runtime configuration, not
+  capability inputs to persist; later agent authentication must keep them out of evidence.
 - **Legacy traits:** table-based layout, no test IDs, generic class names, an `<iframe>` for the
   account panel, server-rendered forms with full-page posts, a login page with session cookie.
 - **Fault injection** (via header/query/env toggle so evidence runs are reproducible):
@@ -201,7 +211,7 @@ problems" on purpose:
   - `interstitial` — recoverable ("system notice" modal to dismiss)
   - `permission_denied` — hard failure
   - `app_error` — hard failure (500 page)
-  - `unexpected_confirm` — triggers HITL (dialog not in artifact)
+  - `unexpected_confirm` — unfamiliar HTML interruption page; future HITL trigger, not a native browser dialog
 
 Using a public demo site was rejected: no fault injection, terms-of-service risk, no control
 over legacy characteristics.

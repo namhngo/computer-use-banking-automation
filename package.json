@@ -10,6 +10,7 @@
     "pnpm": "11.13.0"
   },
   "scripts": {
+    "mock-app": "node --env-file-if-exists=.env --import tsx mock-app/server.ts",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --project unit",
@@ -19,6 +20,8 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:browser"
   },
   "dependencies": {
+    "@hono/node-server": "2.1.1",
+    "hono": "4.13.7",
     "playwright": "1.63.0",
     "zod": "4.6.1"
   },
