@@ -61,6 +61,7 @@ export const recordSchema = z.strictObject({
   value: textValueSchema.optional(),
   field: fieldSchema.optional(),
   ms: z.number().int().min(50).max(1000).optional(),
+  outcome: z.enum(['member_not_found', 'invalid_member_id']).optional(),
 });
 export type DiscoveryRecord = z.infer<typeof recordSchema>;
 

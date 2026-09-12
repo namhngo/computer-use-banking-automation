@@ -12,6 +12,7 @@
   "scripts": {
     "mock-app": "node --env-file-if-exists=.env --import tsx mock-app/server.ts",
     "discover": "node --env-file-if-exists=.env --import tsx src/cli/discover.ts",
+    "compile": "node --env-file-if-exists=.env --import tsx src/cli/compile.ts",
     "replay": "node --env-file-if-exists=.env --import tsx src/cli/replay.ts",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",

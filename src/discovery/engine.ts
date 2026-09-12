@@ -344,7 +344,7 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
                   const captured = await active.capture(decision.input.ref!);
                   code = await verifyBusinessOutcome(active, decision.input.ref!, decision.input.outcome, submittedMember, memberId!);
                   active.health();
-                  return { ref: decision.input.ref!, target: captured.target,
+                  return { ref: decision.input.ref!, target: captured.target, outcome: decision.input.outcome,
                     ...(captured.targetKey ? { targetKey: captured.targetKey } : {}),
                     path: observation.path, framePath: captured.framePath };
                 }

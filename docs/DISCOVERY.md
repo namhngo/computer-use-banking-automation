@@ -156,8 +156,10 @@ in targets become `{ "source": "input", "name": "memberId" }`, and every string 
 against credentials, the provider key, the goal's member ID, and values read from the UI. A
 transcript that fails these checks is not written and the run reports `TRANSCRIPT_UNSAFE`.
 
-The transcript is an input to the Phase 5 compiler, not a capability artifact. It does not
-grant replay eligibility and is not registered.
+The transcript is the input to `pnpm compile` (see [COMPILE.md](COMPILE.md)), not a capability
+artifact. It does not grant replay eligibility and is not registered. Business-outcome `complete`
+records carry the claimed `outcome` so the compiler can emit an `observed` handler without
+inferring it from UI text.
 
 ## Limits
 

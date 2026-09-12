@@ -589,7 +589,7 @@ start the next phase until its prerequisites and the review gates above have pas
 | **2. Artifact schema + policy** (completed) | Strict artifact/target/condition/result schemas; explicit input references, integer cents, invocation eligibility, immutable registry; pure policy decisions | Contract, parser, corruption/symlink/concurrent-write, secret-guard, route/action, overlapping-risk, and bounded-recovery tests pass; example remains authored/draft |
 | **3. Surface adapter + replay engine** (completed) | Node-bound refs, scoped targeting, guarded DOM dispatch, mandatory HTTP proxy/POST grants, bounded replay/recovery, CLI, structural evidence | Actual authored-draft runs: success, not-found, recovery, hard failure; stale/ambiguous refs, wrong-frame identity, late control mutation, redirects, cancellation, and evidence tests pass; no LLM dependency |
 | **4. Discovery agent** (completed) | intent extraction, redacted semantic observation with node refs, seven schema-checked tools, bounded loop with trusted classification and completion verification, sanitized transcript recorder, OpenAI client with per-call receipts, `pnpm discover` CLI | Offline: test-only models complete the goal in varying orders and every unsafe proposal is rejected. Live: `gpt-4.1` completed the balance goal in 9 turns and reported a verified not-found outcome; transcripts + events reviewed in `evidence/discovery-phase4/` |
-| **5. Compiler + verification** (½–1 day) | conservative transcript compilation, explicit handler provenance, fresh-state sandbox verification | Discovered artifact replays with two synthetic member IDs; output/identity checks pass; ambiguous action effects are not pruned; writes are never automatically verified |
+| **5. Compiler + verification** (completed) | conservative transcript compilation with observed postconditions and identity checkpoint, `observed` outcome handlers from separate transcripts, fresh-sandbox two-member verification publishing a new verified revision, `pnpm compile` CLI | The live-discovered artifact replays for `12345` and `67890` in fresh sandboxes; v2 verified then replays a third member and the not-found outcome model-free; rejected proposals leave no step; hardcoded literals and fixture names are rejected; drafts with writes are refused; evidence in `evidence/compile-phase5/` |
 | **6. HITL** (½–1 day) | state machine, loopback HTTP, ownership, navigation-safe human recorder, validated resume | Same-session handoff and completion; negative tests for competing claims, unsafe skip/retry, stale state, blocked actions, and recording after navigation |
 | **7. Capability router** (½ day) | `pnpm agent --goal`: compatible catalog supplied upfront; structured execute/discover/clarify decision | Cold run discovers and verifies without extra execution; warm run replays; ambiguous goals clarify; no rediscovery on policy denial; no automatic duplicate writes |
 | **8. Evidence set + docs** (½–1 day) | reviewed `evidence/`, README (setup, agent and direct commands, offline replay), REPORT with seven exact headings | Fresh-clone demo works; evidence review finds no secrets/raw sensitive captures; README distinguishes completed work from future plans |
@@ -603,8 +603,9 @@ time-box, it is the first thing to cut back to "explicit commands only."
 ### 10.3 Demo path (target for README)
 
 The `pnpm agent` router and operator endpoints below remain planned. The implemented Phase 3
-replay and Phase 4 discovery paths are shown separately so a draft is never silently promoted
-or run outside verification, and a discovery transcript is never mistaken for an artifact. Generated evidence stays ignored until reviewed for publication.
+replay, Phase 4 discovery, and Phase 5 compile/verify paths are shown separately so a draft is
+never silently promoted or run outside verification, and a discovery transcript is never
+mistaken for an artifact. Generated evidence stays ignored until reviewed for publication.
 
 ```bash
 pnpm mock-app                                                   # terminal 1
@@ -616,10 +617,13 @@ pnpm agent --goal "look up member 67890 and read their current savings balance"
 #   warm: routes to get_member_savings_balance → replay only, no discovery, no UI reasoning
 
 # Implemented now (Phase 4): live OpenAI discovery against an owned sandbox → sanitized transcript
-# Requires OPENAI_API_KEY in the ignored .env. Compilation into an artifact is Phase 5.
+# Requires OPENAI_API_KEY in the ignored .env.
 pnpm discover --goal "look up member 12345 and read their current savings balance" --sandbox
-pnpm discover --goal "look up member 12345 and read their current savings balance" \
-              --target http://localhost:4000/
+pnpm discover --goal "look up member 99999 and read their current savings balance" --sandbox
+
+# Implemented now (Phase 5): transcript → draft → two-member fresh-sandbox verification → verified v2
+pnpm compile --run <success-runId> --outcome-run <not-found-runId> \
+  --verify --sandbox --verify-inputs '{"memberId":"12345"}' --verify-inputs '{"memberId":"67890"}'
 
 # Implemented now: owned sandbox, authored draft, no model
 pnpm replay --artifact examples/get-member-savings-balance.json \

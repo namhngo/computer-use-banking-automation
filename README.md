@@ -9,17 +9,22 @@ Phases 0-3 provide the local Harbor sandbox, typed capability contracts, registr
 model-free replay through Playwright with browser/network policy enforcement and private evidence.
 Phase 4 adds a bounded discovery loop in which an OpenAI tool-calling model chooses actions from
 redacted live observations while the engine classifies, authorizes, and dispatches each one.
-Verified on Node 22.22.1: lint, strict typechecking, 699 unit/contract/HTTP/CLI tests, and 154 browser tests pass.
+Phase 5 compiles the resulting transcript into a draft artifact and verifies it by model-free
+replay in fresh sandboxes before publishing a verified revision.
+Verified on Node 22.22.1: lint, strict typechecking, 731 unit/contract/HTTP/CLI tests, and 158 browser tests pass.
 
 Genuine live `gpt-4.1` discovery runs (success and not-found) are reviewed and published in
-[evidence/discovery-phase4](evidence/discovery-phase4/README.md). Offline tests drive the same
-loop with explicitly test-only models (`source: "test"`). The artifact compiler/promotion
-workflow and human handoff are **not implemented yet**: the authored replay example was not
-produced from a discovery transcript, and the discovery transcripts are not yet replayable.
+[evidence/discovery-phase4](evidence/discovery-phase4/README.md). Phase 5 compiles that live
+transcript into a capability artifact, verifies it by model-free replay with two members in fresh
+sandboxes, and publishes a verified revision that the production replay path then executes; see
+[evidence/compile-phase5](evidence/compile-phase5/README.md). Offline tests drive the same
+loops with explicitly test-only models (`source: "test"`). Human handoff and the goal-driven
+router are **not implemented yet**.
 
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
-See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md), and
-[the discovery guide](docs/DISCOVERY.md) for implemented semantics and limitations.
+See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md),
+[the discovery guide](docs/DISCOVERY.md), and [the compile guide](docs/COMPILE.md) for
+implemented semantics and limitations.
 
 ## Setup
 
@@ -52,6 +57,7 @@ credentials, or browser storage are persisted by the tests.
 | `pnpm mock-app` | Start the local banking sandbox at `http://127.0.0.1:4000` |
 | `pnpm replay ...` | Execute a saved artifact without a model; see the sandbox demo below |
 | `pnpm discover ...` | Bounded live-model discovery of the balance goal; requires `OPENAI_API_KEY`; see the discovery demo below |
+| `pnpm compile ...` | Compile a discovery transcript into a draft artifact and optionally verify it in fresh sandboxes; no model |
 | `pnpm lint` | ESLint with type-aware TypeScript rules and no warnings |
 | `pnpm typecheck` | Strict TypeScript checking without emitting files |
 | `pnpm test` | Artifact, binding, result, registry, policy, configuration, HTTP, and CLI tests; browser not required |
@@ -198,9 +204,10 @@ It contains no concrete member input or login credentials and is not marked veri
 | `src/policy/policy.ts` | Strict YAML loading and separate request/action authorization decisions |
 
 Drafts can be prepared only for explicit read-only sandbox verification. Normal replay
-eligibility requires verified metadata, which the future verification workflow must substantiate.
-Registry revisions cannot be overwritten, even for a status change. Generated artifacts belong
-under ignored `artifacts/capabilities/`; reviewed submission evidence remains a separate step.
+eligibility requires verified metadata, which `pnpm compile --verify` substantiates by publishing
+a new revision after two fresh-sandbox replays succeed (`src/compiler/verify.ts`). Registry
+revisions cannot be overwritten, even for a status change. Generated artifacts belong under
+ignored `artifacts/capabilities/`; reviewed submission evidence remains a separate step.
 
 Policy action identities must come from a trusted adapter after locating a real control, not
 from a model-supplied key or risk label. The current policy denies sub-account creation and
@@ -283,11 +290,38 @@ pnpm discover --goal "look up member 67890 and read their current savings balanc
 Each run writes `events.jsonl`, `discovery.json` (a sanitized transcript with model calls, usage,
 and confirmed action receipts), and a structural snapshot on non-success to `artifacts/runs/`.
 See [DISCOVERY.md](docs/DISCOVERY.md) for flags, tools, enforcement, result codes, and limits.
-The transcript is not a capability artifact; compilation and verification are Phase 5.
+The transcript is not a capability artifact; the next step compiles it.
 
 Reviewed live runs of exactly these commands are in
 [evidence/discovery-phase4](evidence/discovery-phase4/README.md). The offline tests drive the
 same loop with test-only models and mark them `source: "test"`.
+
+## Compile And Verify Demo
+
+Turn the discovery transcript into a capability and prove it replays without the model. Use
+the run IDs printed by the two `discover` commands above (success and not-found):
+
+```bash
+pnpm compile --run <success-runId> --outcome-run <not-found-runId> \
+  --verify --sandbox --verify-inputs '{"memberId":"12345"}' --verify-inputs '{"memberId":"67890"}'
+```
+
+This saves an immutable draft (v1) to `artifacts/capabilities/`, replays it in `verification`
+mode in a brand-new sandbox and browser for each member, and on two successes publishes v2 with
+`status: "verified"`. The draft is never modified. Then the production path needs no model:
+
+```bash
+pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"67890"}' --sandbox
+#   SUCCESS, savingsBalanceCents 987654 — a member the model never saw
+pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"99999"}' --sandbox
+#   BUSINESS_OUTCOME / MEMBER_NOT_FOUND via the observed outcome handler
+pnpm replay get_member_savings_balance --version 1 --inputs '{"memberId":"12345"}' --sandbox
+#   FAILURE / INVOCATION_INVALID — drafts are not eligible for production replay
+```
+
+Every step, locator, and postcondition in the artifact is something the model actually did or
+acted on; the compiler refuses to guess (see [COMPILE.md](docs/COMPILE.md)). Reviewed copies of
+the compiled artifacts and all four run logs are in [evidence/compile-phase5](evidence/compile-phase5/README.md).
 
 ## Planned Demo
 
