@@ -5,15 +5,15 @@ The implementation is deliberately incremental and targets one synthetic local w
 
 ## Current Status
 
-Phases 0-2 provide tooling, the local Harbor banking sandbox, typed capability/result contracts,
-input binding, a filesystem capability registry, and pure policy authorization decisions.
-Verified on Node 22.22.1: lint, strict typechecking, 484 unit/contract/HTTP/CLI tests, and 13 browser tests pass.
-The agent, artifact compiler, replay engine, browser policy enforcement, and human handoff
-are **not implemented yet**. The authored example and browser tests are not LLM discovery evidence.
+Phases 0-3 provide the local Harbor sandbox, typed capability contracts, registry, and working
+model-free replay through Playwright with browser/network policy enforcement and private evidence.
+Verified on Node 22.22.1: lint, strict typechecking, 579 unit/contract/HTTP/CLI tests, and 132 browser tests pass.
+The discovery agent, artifact compiler/promotion workflow, and human handoff are **not implemented
+yet**. The authored example and replay evidence are not LLM discovery evidence.
 
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
-See [the implemented contract guide](docs/CONTRACTS.md) for exact Phase 2 semantics.
-Phase 3 connects the contracts to Playwright, actual policy enforcement, and deterministic replay.
+See [the contract guide](docs/CONTRACTS.md) and [the replay guide](docs/REPLAY.md) for implemented
+semantics and limitations. Phase 4 next adds genuine LLM-driven discovery.
 
 ## Setup
 
@@ -44,6 +44,7 @@ credentials, or browser storage are persisted by the tests.
 | Command | Purpose |
 |---|---|
 | `pnpm mock-app` | Start the local banking sandbox at `http://127.0.0.1:4000` |
+| `pnpm replay ...` | Execute a saved artifact without a model; see the sandbox demo below |
 | `pnpm lint` | ESLint with type-aware TypeScript rules and no warnings |
 | `pnpm typecheck` | Strict TypeScript checking without emitting files |
 | `pnpm test` | Artifact, binding, result, registry, policy, configuration, HTTP, and CLI tests; browser not required |
@@ -77,8 +78,8 @@ and an iframe rather than a client framework or test IDs. Account pages also enf
 session, including direct iframe navigation. Sessions expire after 15 minutes.
 
 **Open sub-account** is deliberately present but always returns 403 without changing data.
-This is a safe test target for the future policy engine, not an implementation of that engine:
-automation must eventually block a prohibited action before invoking it.
+This is a safe test target. The replay adapter independently blocks the prohibited action
+before dispatch; tests verify that no sub-account request reaches the server.
 
 Use `--port` to run on a different port. Stop with Ctrl+C; active connections are closed.
 Restarting clears sessions and resets the selected scenario. The server binds only to IPv4
@@ -120,8 +121,8 @@ one-shot faults, and invalidates requests started before reset. Member fixtures 
 Each test/run gets its own instance; this is not a concurrent multi-tenant test server.
 
 There is intentionally **no HTTP reset endpoint and no JSON member-data API**. The agent will
-receive only UI tools, not the factory/reset hook or direct fixture access. A future verification
-runner can reset through this harness and create a fresh browser context; human handoff must
+receive only UI tools, not the factory/reset hook or direct fixture access. The replay CLI's
+sandbox mode creates a fresh instance and browser context; future human handoff must
 instead keep its existing live browser session.
 
 ## Configuration
@@ -136,15 +137,16 @@ Checks run without `.env`; starting the mock app requires its credential variabl
 | `MOCK_USERNAME` | None; required for server | Nonblank local operator ID, up to 100 characters |
 | `MOCK_PASSWORD` | None; required for server | Local-only password, 8-200 characters, not all whitespace |
 
-`pnpm config:check` and `pnpm mock-app` load `.env` if present; existing shell variables take
+`pnpm config:check`, `pnpm mock-app`, and `pnpm replay` load `.env` if present; existing shell variables take
 precedence. `config:check` validates the automation settings only; the mock server validates
 its credentials on startup. No command prints the configured username or password.
 The browser tests ignore these settings and always run headless with isolated test targets.
 The standalone smoke test runs offline. `mock-app` uses `--port` and `--fault` for its scenario;
-`TARGET_URL` describes the future automation target, not the server's bind address.
+`TARGET_URL` supplies the standalone replay origin, not the mock server's bind address.
 No model/provider credentials are read yet. `policy.yaml` now has validated deny-by-default
-request and action rules for the two explicit loopback origins. The policy library can make
-authorization decisions, but no replay/discovery engine enforces them in a browser yet.
+request and action rules for the two explicit loopback origins. Replay enforces action grants
+and routes Chromium traffic through a local policy proxy, including every redirect hop and
+one-use destination/body grants for POSTs. Sandbox mode permits only its newly owned origin.
 The mock server still has its own local-only protections; those are a separate boundary.
 
 Dependencies are pinned exactly with a committed lockfile. TypeScript 5.9.3 stays within the
@@ -158,7 +160,9 @@ is allowed. AI SDK/provider packages will be selected and installed in Phase 4, 
 - `.env` files, generated `artifacts/`, browser state, and raw traces/videos are ignored.
 - Local mock credentials stay in `.env`; `.env.example` contains empty fields only. Public
   test credentials are injected by tests and are not fallback credentials for the running app.
-- Future run outputs go into `artifacts/`, not directly into committed `evidence/`.
+- Run evidence goes into `artifacts/runs/`, not directly into committed `evidence/`.
+- Business outputs are returned on stdout, never written into the normal evidence log. Do not
+  redirect that result into public evidence without reviewing it.
 - Publish only explicitly reviewed and sanitized examples in `evidence/`.
 - Ignore rules reduce accidental commits; they are not a substitute for a secrets review.
 
@@ -186,16 +190,57 @@ Policy action identities must come from a trusted adapter after locating a real 
 from a model-supplied key or risk label. The current policy denies sub-account creation and
 unknown-notice acknowledgment even though both notice types share the same POST route.
 
-For details, supported limits, and Phase 3 responsibilities, see [CONTRACTS.md](docs/CONTRACTS.md).
+`harbor-profile.ts` is deliberately app-specific: it recognizes permitted controls and their
+effects, not the order of a task. It does not decide to search, open a result, or extract a balance.
+The replay artifact currently supplies that order; Phase 4's LLM will discover it from the UI.
+Authentication and some adapter details also remain Harbor-specific. Supporting another app
+requires adapting its reviewed safety/auth profile, not simply pointing the current code at a
+different URL. The bounded discovery loop should be reusable without embedding UI recipes.
+
+For details and supported limits, see [CONTRACTS.md](docs/CONTRACTS.md).
+
+## Replay Demo
+
+With mock credentials configured in `.env`, run the authored draft against a fresh sandbox:
+
+```bash
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification
+```
+
+This starts and closes its own local target and Chromium session. It needs no model key and
+no separately running mock app. Expected result: `SUCCESS`, with `savingsBalanceCents: 123456`
+and `currency: "USD"`. The original draft is not overwritten or automatically approved.
+
+```bash
+# Expected business result, exit 0
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"99999"}' --sandbox --mode verification
+
+# One bounded reauthentication, then success
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"67890"}' --sandbox --mode verification --fault session_expired
+
+# Hard failure with a structural DOM snapshot, exit 1
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault permission_denied
+```
+
+The default mode is normal `replay` and requires verified metadata; a draft needs explicit
+`--sandbox --mode verification`. Registered capabilities require an exact name and `--version`.
+See [REPLAY.md](docs/REPLAY.md) for flags, guarded DOM dispatch, HTTP-only scope, evidence,
+and recovery behavior. Reviewed actual runs are in [evidence/replay-phase3](evidence/replay-phase3/README.md).
+
+Unknown dialogs currently stop with `UNEXPECTED_DIALOG` and close the session. Actual human
+claim/resume is Phase 6, not a mocked success path in this phase.
 
 ## Planned Demo
 
-These automation commands are planned, **not implemented yet**:
+These goal-driven commands are planned, **not implemented yet**:
 
 ```bash
 pnpm agent --goal "look up member 12345 and read their current savings balance"
 pnpm discover --goal "look up member 12345 and read their current savings balance" --target http://localhost:4000
-pnpm replay get_member_savings_balance --input memberId=67890
 ```
 
 The default agent entrypoint will choose an existing compatible capability or discover one.

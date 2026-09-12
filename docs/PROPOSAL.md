@@ -4,11 +4,12 @@
 > against the brief; **[NEW]** sections were missing entirely. Rationale for each change is inline
 > so the reasoning can be lifted into `REPORT.md` later.
 
-**Implementation status:** Phases 0-2 completed on 2026-09-11. `pnpm check` passes lint,
-strict typechecking, 484 unit/contract/HTTP/CLI tests, and 13 Chromium tests. Phase 2 adds
-schemas, explicit binding, a filesystem registry, and pure policy decisions. See
-[CONTRACTS.md](CONTRACTS.md) for exact implemented semantics and `README.md` for setup.
-Phase 3 browser execution/enforcement is next; no real discovery or replay evidence exists yet.
+**Implementation status:** Phases 0-3 completed through 2026-09-12. `pnpm check` passes lint,
+strict typechecking, 579 unit/contract/HTTP/CLI tests, and 132 Chromium tests. Model-free replay,
+guarded UI actions, network enforcement, and private evidence now work against the authored
+draft. See [REPLAY.md](REPLAY.md), [CONTRACTS.md](CONTRACTS.md), and the reviewed
+[replay evidence](../evidence/replay-phase3/README.md). LLM discovery, compilation/promotion,
+and human handoff remain future phases; these replay runs are not discovery evidence.
 
 ---
 
@@ -117,8 +118,9 @@ model credentials. The discovery agent is also a real agent, regardless of CLI e
 
 ### 1.3 Boundaries (single process, justified)
 
-One Node process, CLI-driven, plus a tiny HTTP server that exists only for the HITL handoff
-signal. No queue, no DB, no services. The brief explicitly says not to build scaling
+One CLI-driven Node process with local HTTP listeners for the owned test target and policy
+proxy. HITL will add a small operator signaling endpoint later. No queue, no DB, no distributed
+services. The brief explicitly says not to build scaling
 infrastructure; the seams (registry interface, evidence sink interface, adapter interface) are
 where a production system would swap in real infrastructure.
 
@@ -134,7 +136,7 @@ src/
   replay/         engine, locator resolver (ladder), waits, detectors, result contract
   hitl/           control-transfer state machine, intervention store, HTTP endpoints,
                   human-action recorder
-  evidence/       structured JSONL event log, screenshot capture, redaction
+  evidence/       private JSONL events and content-free structural snapshots
   agent/          capability router: catalog -> execute / discover / clarify decision
   cli/            agent (router), discover, replay, list, serve-operator
 mock-app/         local legacy-style credit-union back-office (the target surface)
@@ -151,7 +153,8 @@ evidence/         committed runs: discovery, replay-success, replay-business-out
 | Concern | Choice | Reason |
 |---|---|---|
 | Language | TypeScript (Node 22, pnpm, tsx) | Playwright's home; Zod inference; fast iteration |
-| Browser control | Playwright | Locators, auto-waiting, accessibility observations, headed mode for HITL; masked failure screenshots rather than raw traces |
+| Browser control | Playwright / Chromium | Scoped locators and node refs; final guard plus DOM dispatch in one browser task; structural failure snapshots, no raw captures |
+| Network guard | Local HTTP policy proxy | Checks every redirect hop and one-use POST destination/body grants; prevents allowed-route substitution after control authorization |
 | LLM layer | Vercel AI SDK + `@ai-sdk/anthropic` | Check compatible stable versions when introduced in Phase 4; pin exact versions and lockfile, rather than assuming the earlier v5 choice |
 | Policy parsing | `yaml` + Zod | Strict YAML without aliases, tags, duplicate keys or implicit policy widening; separate request/action decisions |
 | Model | A supported tool-calling model configured via env | Verify model ID and provider access in Phase 4; record actual usage rather than promise a fixed cost |
@@ -290,7 +293,8 @@ and `currency` (string), avoiding floating-point monetary rounding. References u
 The agent observes a compact accessibility-oriented snapshot plus permitted URL/page context.
 The web adapter owns a mapping from snapshot-scoped refs such as `[e12]` to actual elements
 and frame scope. Merely adding IDs to `ariaSnapshot()` text does not create this mapping.
-Phase 3 must prove ref-to-element resolution before Phase 4 relies on it.
+Phase 3 implements and tests ref-to-element resolution. Observations are bounded semantic DOM
+views, not a claim of a complete browser accessibility tree. They stay in memory, not logs.
 
 Invalidate refs on navigation or a new observation; recheck attachment and uniqueness before
 acting. Duplicate names require frame/container scope, not an arbitrary first match. Capture
@@ -385,11 +389,11 @@ Unsupported target kinds fail clearly rather than pretending another surface was
 validate artifact, inputs, app compatibility, and execution mode
 establish entry state and session preconditions
 for step in artifact.steps:
-    await automation ownership
+    verify run is active                    # human ownership transitions arrive in Phase 6
     evaluate hard-stop, business-outcome, and recovery detectors
     wait for readiness while also checking exceptional states (bounded)
-    enforce policy; resolve scoped target uniquely
-    perform action with typed parameter binding
+    resolve scoped target uniquely; classify actual node; enforce policy
+    guard state and dispatch atomically; grant exact POST destination/body if needed
     evaluate exceptional states and assert postcondition (bounded)
 verify requested member, account, and final checkpoint
 parse and validate every declared output
@@ -398,10 +402,12 @@ return SUCCESS with outputs
 
 Detectors run **after** each action as well as before the next, because an outcome typically
 appears as a result of the action just taken.
-Recovery is bounded across the run and uses the same policy path. After re-login, restore and
-verify a known safe resume state rather than blindly retrying a detail-page step on the login
-landing page. Retry only operations whose repetition is safe; uncertain write effects escalate.
-Never automatically dismiss unknown confirmation dialogs.
+Recovery is bounded across the run and uses the same policy path. Every successful recovery,
+including notice dismissal, clears partial outputs and restarts this read-only flow at entry.
+This prevents stale values from being returned after recovery changes the page. Nonfatal action
+errors allow a bounded detector inspection, not blind redispatch. Policy/network/deadline
+failure cancels pending operations. Unknown dialogs currently fail and close the session;
+real human escalation/resume is Phase 6 work.
 
 ### 5.3 Result contract
 
@@ -429,13 +435,23 @@ implementation detail they cannot act on.
   authorization. Origins are exact, paths have only a five-digit member placeholder, and
   unknown/duplicate query parameters fail closed. Action grants use trusted adapter-derived
   target identities, not model risk labels. Conflicting overlapping rules are rejected.
-  Phase 3 connects these decisions to the browser; configuration alone is not enforcement.
-- **Pre-request checks:** validate explicit destinations before navigation and install browser
-  context request interception before opening pages. Test disallowed requests triggered by
-  clicks, form submissions, redirects, frames, and popups. Block service workers in the
-  prototype; block or explicitly handle channels outside ordinary HTTP routing. Separate
-  permitted resource loading from permitted UI actions. Keep post-navigation checks as defense
-  in depth, not as prevention of a request that already happened.
+  Phase 3 connects these decisions to the actual browser and transport.
+- **Pre-request checks:** a mandatory Chromium HTTP proxy checks every hop before opening an
+  upstream connection. A real experiment found ordinary Playwright routing could miss later
+  redirect hops, so it is not the sole boundary. Every POST also requires a one-use grant for
+  the exact destination and form bytes. Unauthorized traffic revokes forwarding immediately
+  and closes the context, rather than waiting for a pending click to finish.
+- **Headed browser isolation:** a private context marker separates controlled-page requests
+  from Chromium background services. Unmarked traffic is still denied and cannot spend POST
+  grants, but does not abort startup. Controlled-page policy violations remain fatal. The
+  marker is stripped upstream and never persisted; headed watching was manually verified.
+- **Dispatch guard:** disabled controls are not queued. Node/document/form state and actual
+  classification are rechecked after evidence writes; a final check and fixed DOM dispatch
+  occur in one browser task. This deliberately supports the server-rendered target, not apps
+  requiring physical/isTrusted input events. No model-authored JavaScript is executed.
+- **Unsupported channels:** CONNECT/HTTPS tunnels, WebSockets, service workers, downloads,
+  and extra pages are blocked. Non-network URLs are not valid navigate actions. The local
+  HTTP-only prototype is not a general browser/OS sandbox; see REPLAY.md for limits.
 - **Risk classification:** application-owned action/target policy is authoritative. LLM labels
   and button-name heuristics may flag risk but cannot authorize actions. Unknown or irreversible
   actions are blocked in the prototype, including during discovery and recovery. Treat UI text
@@ -445,10 +461,10 @@ implementation detail they cannot act on.
 - **Structured redaction:** sanitize inputs, outputs, URLs, targets, tool results, and errors
   before writing JSONL. Equality replacement alone is insufficient for derived/encoded values.
   Schema flags guide redaction but do not sanitize arbitrary UI text automatically.
-- **Rich evidence:** use field-masked screenshots or sanitized snapshots. Apply masking before
-  capture/persistence, including supported frames; if safe capture is uncertain, omit the image
-  and retain sanitized diagnostics. Raw Playwright traces, videos, network dumps, and browser
-  storage state are off by default and are not submission evidence.
+- **Rich evidence:** Phase 3 persists structural DOM snapshots, not screenshots. Only normalized
+  route templates, approved tags/roles, counts, visibility and presence booleans are accepted.
+  Raw text, attribute values, signatures, screenshots, traces, videos and browser storage are
+  excluded. An unavailable/closed surface is represented explicitly, not silently omitted.
 - **Limits:** browser interception and app-specific masking are not a general browser sandbox
   or a regulated-data compliance solution. Test the supported web paths, document unsupported
   channels, and never claim arbitrary PII detection. The headed browser assumes a trusted local
@@ -456,7 +472,7 @@ implementation detail they cannot act on.
 
 ---
 
-## 7. Human-in-the-loop **[REVISED]**
+## 7. Human-in-the-loop **[REVISED; planned for Phase 6]**
 
 ### 7.1 Control-transfer state machine
 
@@ -499,17 +515,15 @@ duplicate claims and non-owner resume requests. This is the seam the brief asks 
 
 ## 8. Evidence and observability
 
-- One JSONL file per run: `evidence/<runId>/events.jsonl`. Event: `{ ts, runId, phase:
-  discovery|compile|verify|replay|hitl, stepId?, type, action?, target?, resolvedStrategyIndex?,
-  result?, outcome?, failure?, controlOwner, durationMs }`. Discovery events also include the
-  model's stated reasoning for the action (from the tool call), redacted.
-- Masked screenshots or sanitized snapshots at failures and HITL transitions provide the
-  richer signal. Optional checkpoints use the same capture policy. Raw traces remain off.
-- Generated runs live in ignored `artifacts/`. Only explicitly reviewed, sanitized examples
-  are copied into committed `evidence/`; never commit a raw discovery transcript or API key.
-- `evidence/` committed set: `discovery/` (real LLM run), `replay-success/`,
-  `replay-member-not-found/`, `replay-session-expired-recovered/`, `replay-hard-failure/`,
-  `hitl-handoff/`, plus the saved artifact JSON.
+- Phase 3 writes `artifacts/runs/<runId>/events.jsonl`, with strict structural event fields:
+  run/time, phase, step, action, trusted target key, strategy index, recovery attempt/outcome,
+  and terminal code. No raw values, URLs, selectors, or exception objects are accepted.
+- `snapshot_N.json` is the richer failure signal, with bounded, content-free DOM structure.
+  Known sensitive values are additionally redacted from metadata; arbitrary PII detection is
+  not claimed. Business outputs return to the caller, not the persisted log.
+- Reviewed real runs are under `evidence/replay-phase3/`. The original run IDs/timestamps are
+  retained, and the source artifact is explicitly authored/draft. Discovery/model-decision and
+  human-handoff evidence will be added only when those later phases actually run.
 
 ---
 
@@ -517,19 +531,13 @@ duplicate claims and non-owner resume requests. This is the seam the brief asks 
 
 ### 9.1 Surface abstraction
 
-```ts
-interface SurfaceAdapter {
-  observe(): Promise<Snapshot>                       // a11y-tree-shaped, ref-addressed
-  resolve(target: Target): Promise<Handle | null>    // runs the ladder
-  act(handle: Handle, action: Action): Promise<void>
-  checkCondition(c: Condition): Promise<boolean>
-  screenshot(): Promise<Buffer>
-}
-```
+The implemented adapter exposes `observe`, `resolve`, `act`, `checkCondition`, `navigate`,
+`authenticate`, `snapshot`, `health`, and `close`. `resolve` returns an opaque, node-bound ref;
+raw Playwright pages are not exposed to model tools. The precise web API is in
+`src/surface/playwright-adapter.ts`; avoid a speculative generic desktop implementation.
 
 The business contract and replay control structure are reusable, but targets and some
-conditions are surface-specific. The illustrative adapter interface will be refined in Phase 3,
-including navigation/session lifecycle. Adapter selection is application configuration, not an
+conditions are surface-specific, including navigation/session lifecycle. Adapter selection is application configuration, not an
 LLM decision. Chromium is a browser, not a Playwright-only technology; Playwright also supports
 Firefox and WebKit. Legacy web can still use Playwright even when markup is non-semantic.
 
@@ -545,7 +553,7 @@ design-only; the prototype implements one local web app, including scoped iframe
   small **override document**: `{ tenantId, appId, artifactName, artifactVersion,
   stepOverrides: { [stepId]: { target?, value?, waitFor? } }, entryUrl, extraRecoverables[] }`.
   Overrides are merged at load time; stable step IDs make this safe.
-- **Drift detection:** the replay engine already records `resolvedStrategyIndex` per step. A
+- **Drift detection:** the replay engine records `strategyIndex` per step. A
   tenant whose steps consistently resolve on index ≥ 2 (fell past role/label) or whose
   postcondition timings degrade is flagged. Repeated `TARGET_NOT_FOUND` on one tenant with
   success on others → propose an override, never a re-record.
@@ -579,7 +587,7 @@ start the next phase until its prerequisites and the review gates above have pas
 | **0. Skeleton** (½ day) | TypeScript, pinned tooling/lockfile, pnpm, Vitest, Playwright/Chromium, validated environment config, deny-by-default policy template, secret/evidence ignore rules, README | Lint + typecheck + meaningful config tests + real browser smoke test pass without model keys; no future-phase stubs presented as working |
 | **1. Mock app** (½–1 day) | Hono server: login, member search, member detail (iframe accounts panel); synthetic fixtures, reset hook, fault toggles, risky control blocked from automation | Read-only flow works manually, another member has distinct data, reset restores entry state, faults produce expected states; second business flow deferred |
 | **2. Artifact schema + policy** (completed) | Strict artifact/target/condition/result schemas; explicit input references, integer cents, invocation eligibility, immutable registry; pure policy decisions | Contract, parser, corruption/symlink/concurrent-write, secret-guard, route/action, overlapping-risk, and bounded-recovery tests pass; example remains authored/draft |
-| **3. Surface adapter + replay engine** (1 day) | `PlaywrightAdapter`, scoped refs/locators, waits, detectors, policy enforcement, sanitized evidence | Hand-written artifact: success, not-found, session recovery, hard failure; also stale/ambiguous refs, iframe scope, identity/output validation, blocked network/action paths, and redaction tests; replay has no model dependency |
+| **3. Surface adapter + replay engine** (completed) | Node-bound refs, scoped targeting, guarded DOM dispatch, mandatory HTTP proxy/POST grants, bounded replay/recovery, CLI, structural evidence | Actual authored-draft runs: success, not-found, recovery, hard failure; stale/ambiguous refs, wrong-frame identity, late control mutation, redirects, cancellation, and evidence tests pass; no LLM dependency |
 | **4. Discovery agent** (1 day) | intent extraction, a11y snapshot with refs, tools, bounded loop, transcript recorder | One real LLM run completes the balance goal against the mock app; transcript + events saved |
 | **5. Compiler + verification** (½–1 day) | conservative transcript compilation, explicit handler provenance, fresh-state sandbox verification | Discovered artifact replays with two synthetic member IDs; output/identity checks pass; ambiguous action effects are not pruned; writes are never automatically verified |
 | **6. HITL** (½–1 day) | state machine, loopback HTTP, ownership, navigation-safe human recorder, validated resume | Same-session handoff and completion; negative tests for competing claims, unsafe skip/retry, stale state, blocked actions, and recording after navigation |
@@ -594,9 +602,9 @@ time-box, it is the first thing to cut back to "explicit commands only."
 
 ### 10.3 Demo path (target for README)
 
-These are planned commands, not Phase 0 functionality. The configured default target is the
-single local app; explicit `--target` remains supported and policy-checked. The first demo uses
-an empty sandbox registry. Generated evidence stays ignored until reviewed for publication.
+The goal-driven commands and operator endpoints below remain planned. The implemented
+Phase 3 replay path is shown separately so a draft is never silently promoted or run outside
+verification. Generated evidence stays ignored until reviewed for publication.
 
 ```bash
 pnpm mock-app                                                   # terminal 1
@@ -607,14 +615,20 @@ pnpm agent --goal "look up member 12345 and read their current savings balance"
 pnpm agent --goal "look up member 67890 and read their current savings balance"
 #   warm: routes to get_member_savings_balance → replay only, no discovery, no UI reasoning
 
-# Explicit path: each stage on its own (required by brief; used for evidence + fault injection)
+# Planned discovery path (Phase 4/5)
 pnpm discover --goal "look up member 12345 and read their current savings balance" \
               --target http://localhost:4000                    # real LLM run → artifact
-pnpm replay get_member_savings_balance --input memberId=12345   # SUCCESS
-pnpm replay get_member_savings_balance --input memberId=99999   # BUSINESS_OUTCOME MEMBER_NOT_FOUND
-pnpm replay get_member_savings_balance --input memberId=12345 --fault session_expired   # recovered
-pnpm replay get_member_savings_balance --input memberId=12345 --fault permission_denied # FAILURE
-pnpm replay get_member_savings_balance --input memberId=12345 --fault unexpected_confirm # NEEDS_HUMAN
+
+# Implemented now: owned sandbox, authored draft, no model
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification
+# Add --fault session_expired or --fault permission_denied for exceptional runs.
+# --fault unexpected_confirm currently fails UNEXPECTED_DIALOG; no fake handoff.
+
+# Once a verified registry revision exists, normal model-free replay is also available:
+pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"67890"}'
+
+# Planned operator signaling (Phase 6)
 curl -X POST "http://localhost:4100/interventions/$INTERVENTION_ID/claim" \
   -H "Authorization: Bearer $OPERATOR_TOKEN"
 #   ... operator acts in the headed browser ...
@@ -626,13 +640,13 @@ curl -X POST "http://localhost:4100/interventions/$INTERVENTION_ID/resume" \
 
 ---
 
-## 11. Decisions carried into Phase 3
+## 11. Decisions carried forward
 
-1. Implement `table_cell` with exact row/header matching and explicit iframe scope. Validate
+1. Preserve the implemented `table_cell` exact row/header matching and explicit iframe scope. Validate
    uniqueness, stale refs, and requested member identity; never hide ambiguity with `.first()`.
 2. Re-login is a session-manager operation using runtime credentials, not nested capability
    execution. Reauthentication restarts at the safe entry step and refills inputs.
-3. Build the trusted Harbor target classifier before wiring action authorization. A model
+3. Use the trusted Harbor target classifier for action authorization. A model
    cannot supply its own `targetKey`; a known and an unknown notice share a route but not a grant.
 4. Keep vision and desktop execution out of this slice. The schema deliberately rejects
    unimplemented target kinds; describe future extension in the report without claiming reuse

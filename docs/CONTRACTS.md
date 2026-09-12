@@ -1,14 +1,15 @@
 # Phase 2 Contracts
 
-These contracts are implemented and tested. They do not execute browser actions or prove that
-an artifact has been discovered or replayed. The source of truth is the Zod schemas under
-`src/artifact/` and `src/policy/`, plus the semantic checks around them.
+These contracts were defined in Phase 2. Phase 3 now executes them through the adapter/replay
+engine described in [REPLAY.md](REPLAY.md). A validated schema still does not prove discovery
+or execution. The source of truth is the Zod schemas and their semantic checks.
 
 ## Artifact
 
 The full [authored example](../examples/get-member-savings-balance.json) describes the actual
 Harbor UI: open search, fill member ID, submit search, click View member, and extract savings
-and currency from the iframe. It is **draft**, not discovery evidence or a verified capability.
+and currency from the iframe. It remains **draft** even though Phase 3 demonstrates sandbox
+execution; the CLI does not automatically publish a verified registry revision.
 
 | Field | Contract |
 |---|---|
@@ -62,7 +63,7 @@ Targets have ordered `strategies` and optional `scope`:
 
 - `role`: exact accessibility role and exact accessible name, including empty names where valid.
 - `label` and `text`: exact semantic matches.
-- `css`: literal selector, with uniqueness checked by the future adapter.
+- `css`: literal selector, with uniqueness checked by the adapter.
 - `table_cell`: find the unique table/row by exact first-cell text; choose the column by exact
   header text or a one-based numeric index. Numeric columns support the member identity table,
   which has no header row. Row/header/table ambiguity must stop, not choose the first match.
@@ -72,7 +73,8 @@ Targets have ordered `strategies` and optional `scope`:
 Conditions are `visible`, `text_equals`, or `path_equals`, optionally grouped in a single-level
 `all`/`any`. `path_equals` compares the pathname; network policy independently validates query
 strings. Missing frames make a detector false rather than hiding other eligible detectors;
-an action target with a missing frame must fail. These execution semantics are Phase 3 work.
+an action target with a missing frame must fail. Phase 3 implements these semantics with bounded
+polling, concrete node refs, and fail-closed ambiguity handling.
 
 The example checks the member identity in both the outer page and account iframe, locates the
 Savings row explicitly, and verifies USD. It must not return a balance from a stale/wrong frame.
@@ -102,13 +104,15 @@ Mutating flows are rejected in both modes. Neither a caller's mode nor a metadat
 substitutes for browser policy enforcement or proving a real verification run took place.
 
 Authentication is an environment-owned prerequisite. Credentials are not artifact inputs,
-literals, or nested login capabilities. The future session manager obtains them at runtime.
+literals, or nested login capabilities. The adapter receives them from runtime configuration.
 Reauthentication must restart at the first read-only navigation matching `entryPath`, so it
 refills the member ID rather than retrying a Search click against a blank form.
 
 A known-notice dismissal declares a scoped control and postcondition. Every recovery action
-will pass through the same policy checks as ordinary actions. Per-handler and total attempt
+passes through the same policy checks as ordinary actions. Per-handler and total attempt
 budgets are separate. Unknown notices do not gain permission just because their route matches.
+Phase 3 clears partial outputs and restarts at entry after every successful recovery, including
+dismissal, to avoid returning values read before a recovery changed the page.
 
 ## Replay Results
 
@@ -177,6 +181,8 @@ sub-account creation and unknown-notice acknowledgment. Both notices POST to `/n
 only `system_notice_ok` has an action grant. Tests prove that permitting a route alone does not
 grant permission to every button on it.
 
-These are pure decisions only. Phase 3 must connect them to request interception, redirects,
-frames/popups, trusted target classification, and every browser action. The mock server's own
-403 response is not proof that the automation system enforced its policy.
+The policy module remains a pure decision layer. Phase 3 connects it to actual target
+classification, guarded DOM dispatch, and a Chromium HTTP proxy that validates each redirect
+hop and requires one-use POST grants. Policy failure immediately revokes forwarding and closes
+the context. The mock server's own 403 response is not proof of that enforcement; the browser
+tests additionally assert zero upstream requests for prohibited operations.
