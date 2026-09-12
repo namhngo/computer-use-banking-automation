@@ -187,4 +187,5 @@ Unknown dialogs and exhausted recovery currently return failures and close the s
 same-session human claim/resume belongs to Phase 6; no fake intervention ID is created here.
 Headed mode currently lets an operator watch, not take ownership. Phase 6 needs explicit
 controller-mediated authorization for manual POSTs; disabling the proxy is not a handoff.
-Phase 4 next adds genuine LLM-driven discovery using these bounded surface operations.
+Phase 4 builds LLM-driven discovery on these same bounded surface operations; see
+[DISCOVERY.md](DISCOVERY.md).

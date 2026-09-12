@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
-import type { Browser, BrowserContext, ElementHandle, Frame, Locator, Page } from 'playwright';
+import type { Browser, BrowserContext, ElementHandle, Frame, JSHandle, Locator, Page } from 'playwright';
 import { bindText } from '../artifact/bindings.js';
 import { targetSchema } from '../artifact/schema.js';
 import type { Condition, Target } from '../artifact/schema.js';
@@ -13,14 +13,26 @@ import { startPolicyProxy } from './network.js';
 
 type Inputs = Record<string, string | number | boolean>;
 type Selector = NonNullable<Target['scope']>['frames'][number];
-type Control = { handle: ElementHandle<Element>; frame: Frame; signature: string; epoch: number; strategyIndex: number };
+type Control = { handle: ElementHandle<Element>; frame: Frame; signature: string; epoch: number; strategyIndex: number; target: Target; inputs: Inputs };
 export type SurfaceEvent = { type: string; action?: string; targetKey?: string; strategyIndex?: number; code?: string };
-export type Observation = { generation: number; controls: Array<{ ref: string; tag: string; label: string; text: string; target: Target }> };
+export type Observation = {
+  generation: number; path: string; truncated: boolean;
+  controls: Array<{ ref: string; tag: string; label: string; text: string; target: Target;
+    framePath: string; enabled: boolean; inputType: string | null; href: string | null; truncated: boolean;
+    options: Array<{ label: string; value: string; disabled: boolean }> }>;
+};
+export type CapturedControl = {
+  target: Target; targetKey: string | null; framePath: string; role: string | null;
+  /** Private validation data. Never send to the model or persist in a transcript. */
+  formValues: Record<string, string>;
+};
 
 export class PlaywrightAdapter {
   private epoch = 0;
   private serial = 0;
   private readonly controls = new Map<string, Control>();
+  private documentEpoch = 0;
+  private readonly documents = new Map<Frame, JSHandle<{ state: { version: number }; observer: MutationObserver }>>();
   private fatal: SurfaceError | undefined;
   private closed = false;
   private closePromise: Promise<void> | undefined;
@@ -43,7 +55,15 @@ export class PlaywrightAdapter {
     }, Math.max(1, deadline - Date.now()));
     this.page.on('framenavigated', (frame) => {
       this.invalidate();
+      this.documentEpoch++;
+      void this.documents.get(frame)?.dispose().catch(() => {});
+      this.documents.delete(frame);
       if (frame.url() !== 'about:blank' && !this.allowed(frame.url())) this.fail('POLICY_BLOCKED');
+    });
+    this.page.on('framedetached', (frame) => {
+      this.documentEpoch++;
+      void this.documents.get(frame)?.dispose().catch(() => {});
+      this.documents.delete(frame);
     });
     this.page.on('dialog', (dialog) => {
       this.fail('UNEXPECTED_DIALOG');
@@ -212,7 +232,8 @@ export class PlaywrightAdapter {
       if (!await handle.isVisible()) { await handle.dispose(); continue; }
       if (!await handle.isEnabled()) { await handle.dispose(); continue; }
       if (await handle.ownerFrame() !== frame) { await handle.dispose(); throw new SurfaceError('INVALID_TARGET'); }
-      return { handle, frame, signature: await elementSignature(handle), epoch: this.epoch, strategyIndex };
+      return { handle, frame, signature: await elementSignature(handle), epoch: this.epoch, strategyIndex,
+        target: structuredClone(target), inputs: { ...inputs } };
     }
     throw new SurfaceError('TARGET_NOT_FOUND');
   }
@@ -228,6 +249,43 @@ export class PlaywrightAdapter {
       if (error instanceof SurfaceError) throw error;
       throw new SurfaceError('INVALID_TARGET');
     }
+  }
+
+  /** Capture a reusable candidate only if it resolves to exactly the node selected by the model. */
+  async capture(ref: string): Promise<CapturedControl> {
+    this.health();
+    const control = this.controls.get(ref);
+    if (!control || control.epoch !== this.epoch) throw new SurfaceError('STALE_REF');
+    let candidate: Control | undefined;
+    try {
+      this.readable(control.frame);
+      if (await elementSignature(control.handle) !== control.signature) throw new SurfaceError('STALE_REF');
+      candidate = await this.resolveElement(control.target, control.inputs);
+      if (!await candidate.handle.evaluate((element, selected) => element === selected, control.handle)) {
+        throw new SurfaceError('UNREPLAYABLE_TARGET');
+      }
+      const targetKey = await classifyHarborTarget(control.handle, control.frame, this.origin);
+      const formValues = await control.handle.evaluate((element) => {
+        const form = element instanceof HTMLInputElement || element instanceof HTMLButtonElement || element instanceof HTMLSelectElement ? element.form : null;
+        if (!form) return {};
+        const fields: Array<[string, string]> = [];
+        const data = element instanceof HTMLButtonElement && element.type === 'submit' ? new FormData(form, element) : new FormData(form);
+        data.forEach((value, name) => {
+          if (typeof value !== 'string' || fields.length >= 20 || value.length > 10_000
+            || fields.some(([key]) => key === name)) throw new Error('Unsupported form');
+          fields.push([name, value]);
+        });
+        return Object.fromEntries(fields);
+      });
+      this.health();
+      if (control.epoch !== this.epoch || await elementSignature(control.handle) !== control.signature) throw new SurfaceError('STALE_REF');
+      return { target: structuredClone(control.target), targetKey: targetKey ?? null,
+        framePath: new URL(control.frame.url()).pathname, role: await control.handle.getAttribute('role'), formValues };
+    } catch (error) {
+      this.health();
+      if (error instanceof SurfaceError) throw error;
+      throw new SurfaceError('CAPTURE_FAILED');
+    } finally { await candidate?.handle.dispose(); }
   }
 
   async navigate(path: string): Promise<void> {
@@ -398,12 +456,52 @@ export class PlaywrightAdapter {
     return false;
   }
 
+  /** Private consistency token. Mutation counters also catch content changed and then restored. */
+  async documentState(): Promise<string> {
+    this.health();
+    const epoch = this.documentEpoch;
+    const frames = this.page.frames();
+    if (frames.length > 10) throw new SurfaceError('OBSERVATION_LIMIT');
+    const states: unknown[] = [];
+    try {
+      for (const frame of frames) {
+        this.readable(frame);
+        let tracker = this.documents.get(frame);
+        if (!tracker) {
+          tracker = await frame.evaluateHandle(() => {
+            const state = { version: 0 };
+            const observer = new MutationObserver((records) => { if (records.length) state.version++; });
+            observer.observe(document, { childList: true, subtree: true, attributes: true, characterData: true });
+            return { state, observer };
+          });
+          this.documents.set(frame, tracker);
+        }
+        states.push(await tracker.evaluate(({ state, observer }) => {
+          if (observer.takeRecords().length) state.version++;
+          const html = document.documentElement.outerHTML;
+          const controls = Array.from(document.querySelectorAll('input, select, textarea'));
+          if (html.length > 200_000 || controls.length > 200) throw new Error('Document too large');
+          return { url: document.URL, version: state.version, html,
+            values: controls.map((control) => control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement ? control.value : null) };
+        }));
+      }
+      this.health();
+      if (epoch !== this.documentEpoch) throw new SurfaceError('STATE_CHANGED');
+      return createHash('sha256').update(JSON.stringify({ epoch, states })).digest('hex');
+    } catch (error) {
+      this.health();
+      if (error instanceof SurfaceError) throw error;
+      throw new SurfaceError('STATE_CHANGED');
+    }
+  }
+
   async observe(): Promise<Observation> {
     this.health();
     this.invalidate();
     const generation = this.epoch;
     const controls: Observation['controls'] = [];
-    for (const frame of this.page.frames()) {
+    let truncated = this.page.frames().length > 10;
+    for (const frame of this.page.frames().slice(0, 10)) {
       if (frame.url() === 'about:blank') continue;
       this.readable(frame);
       const frames: NonNullable<Target['scope']>['frames'] = [];
@@ -424,9 +522,10 @@ export class PlaywrightAdapter {
       }
       const scope = frames.length > 0 ? { frames } : undefined;
       // This fixed CSS query returns elements, never text/comment nodes.
-      const elements = await frame.locator('input, button, select, a, td, th, h1, h2, [role]').elementHandles() as ElementHandle<Element>[];
+      const elements = await frame.locator('input, button, select, a, td, th, h1, h2, strong, p, span, label, [role]').elementHandles() as ElementHandle<Element>[];
       for (const handle of elements) {
-        if (controls.length >= 200 || !await handle.isVisible()) { await handle.dispose(); continue; }
+        if (controls.length >= 200) { truncated = true; await handle.dispose(); continue; }
+        if (!await handle.isVisible()) { await handle.dispose(); continue; }
         const info = await handle.evaluate((element) => {
           const field = element instanceof HTMLInputElement || element instanceof HTMLSelectElement ? element : null;
           const label = (field?.labels?.[0]?.textContent ?? element.getAttribute('aria-label') ?? '').replace(/\s+/g, ' ').trim().slice(0, 500);
@@ -439,6 +538,11 @@ export class PlaywrightAdapter {
             tag: element.tagName.toLowerCase(), label, text: (element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 500),
             column, rowLabel: (cells[0]?.textContent ?? '').replace(/\s+/g, ' ').trim(),
             header: headers.length === 1 ? (headers[0]?.cells[column]?.textContent ?? '').replace(/\s+/g, ' ').trim() : '',
+            inputType: element instanceof HTMLInputElement ? element.type : null,
+            href: element instanceof HTMLAnchorElement ? element.href : null,
+            truncated: (element.textContent?.length ?? 0) > 500 || (element instanceof HTMLSelectElement && element.options.length > 30),
+            options: element instanceof HTMLSelectElement ? Array.from(element.options).slice(0, 30)
+              .map((option) => ({ label: option.label.slice(0, 200), value: option.value.slice(0, 200), disabled: option.disabled })) : [],
           };
         });
         const strategies: Target['strategies'] = [];
@@ -456,12 +560,18 @@ export class PlaywrightAdapter {
         if (strategies.length === 0) { await handle.dispose(); continue; }
         const target: Target = { strategies, ...(scope ? { scope } : {}) };
         const ref = `e${generation}_${++this.serial}`;
-        this.controls.set(ref, { handle, frame, signature: await elementSignature(handle), epoch: generation, strategyIndex: 0 });
-        controls.push({ ref, tag: info.tag, label: info.label, text: info.text, target });
+        this.controls.set(ref, { handle, frame, signature: await elementSignature(handle), epoch: generation, strategyIndex: 0,
+          target: structuredClone(target), inputs: {} });
+        const destination = info.href ? URL.parse(info.href) : null;
+        const href = destination && this.allowed(destination.href) ? `${destination.pathname}${destination.search}` : null;
+        controls.push({ ref, tag: info.tag, label: info.label, text: info.text, target,
+          framePath: new URL(frame.url()).pathname, enabled: await handle.isEnabled(), inputType: info.inputType,
+          href, truncated: info.truncated, options: info.options });
       }
     }
     if (generation !== this.epoch) throw new SurfaceError('STALE_REF');
-    return { generation, controls };
+    this.health();
+    return { generation, path: new URL(this.page.url()).pathname, truncated, controls };
   }
 
   async snapshot(): Promise<SafeSnapshot> {
@@ -498,7 +608,10 @@ export class PlaywrightAdapter {
       this.closed = true;
       clearTimeout(this.timer);
       this.invalidate();
-      try { await this.browser.close(); } finally { await this.proxy.close(); }
+      for (const tracker of this.documents.values()) void tracker.dispose().catch(() => {});
+      this.documents.clear();
+      // Revoke transport before waiting for browser shutdown, which can itself stall.
+      try { await this.proxy.close(); } finally { await this.browser.close(); }
     })();
     return this.closePromise;
   }

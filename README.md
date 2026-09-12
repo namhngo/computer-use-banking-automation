@@ -7,13 +7,19 @@ The implementation is deliberately incremental and targets one synthetic local w
 
 Phases 0-3 provide the local Harbor sandbox, typed capability contracts, registry, and working
 model-free replay through Playwright with browser/network policy enforcement and private evidence.
-Verified on Node 22.22.1: lint, strict typechecking, 579 unit/contract/HTTP/CLI tests, and 132 browser tests pass.
-The discovery agent, artifact compiler/promotion workflow, and human handoff are **not implemented
-yet**. The authored example and replay evidence are not LLM discovery evidence.
+Phase 4 adds a bounded discovery loop in which an OpenAI tool-calling model chooses actions from
+redacted live observations while the engine classifies, authorizes, and dispatches each one.
+Verified on Node 22.22.1: lint, strict typechecking, 699 unit/contract/HTTP/CLI tests, and 154 browser tests pass.
+
+Genuine live `gpt-4.1` discovery runs (success and not-found) are reviewed and published in
+[evidence/discovery-phase4](evidence/discovery-phase4/README.md). Offline tests drive the same
+loop with explicitly test-only models (`source: "test"`). The artifact compiler/promotion
+workflow and human handoff are **not implemented yet**: the authored replay example was not
+produced from a discovery transcript, and the discovery transcripts are not yet replayable.
 
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
-See [the contract guide](docs/CONTRACTS.md) and [the replay guide](docs/REPLAY.md) for implemented
-semantics and limitations. Phase 4 next adds genuine LLM-driven discovery.
+See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md), and
+[the discovery guide](docs/DISCOVERY.md) for implemented semantics and limitations.
 
 ## Setup
 
@@ -45,6 +51,7 @@ credentials, or browser storage are persisted by the tests.
 |---|---|
 | `pnpm mock-app` | Start the local banking sandbox at `http://127.0.0.1:4000` |
 | `pnpm replay ...` | Execute a saved artifact without a model; see the sandbox demo below |
+| `pnpm discover ...` | Bounded live-model discovery of the balance goal; requires `OPENAI_API_KEY`; see the discovery demo below |
 | `pnpm lint` | ESLint with type-aware TypeScript rules and no warnings |
 | `pnpm typecheck` | Strict TypeScript checking without emitting files |
 | `pnpm test` | Artifact, binding, result, registry, policy, configuration, HTTP, and CLI tests; browser not required |
@@ -136,23 +143,28 @@ Checks run without `.env`; starting the mock app requires its credential variabl
 | `HEADLESS` | `true` | Exactly `true` or `false` |
 | `MOCK_USERNAME` | None; required for server | Nonblank local operator ID, up to 100 characters |
 | `MOCK_PASSWORD` | None; required for server | Local-only password, 8-200 characters, not all whitespace |
+| `OPENAI_API_KEY` | None; required for `discover` only | Provider key; never printed, redacted from all evidence and model context |
+| `DISCOVERY_MODEL` | `gpt-4.1` | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, optionally with the `-2025-04-14` snapshot suffix |
 
-`pnpm config:check`, `pnpm mock-app`, and `pnpm replay` load `.env` if present; existing shell variables take
+`pnpm config:check`, `pnpm mock-app`, `pnpm replay`, and `pnpm discover` load `.env` if present; existing shell variables take
 precedence. `config:check` validates the automation settings only; the mock server validates
 its credentials on startup. No command prints the configured username or password.
 The browser tests ignore these settings and always run headless with isolated test targets.
 The standalone smoke test runs offline. `mock-app` uses `--port` and `--fault` for its scenario;
 `TARGET_URL` supplies the standalone replay origin, not the mock server's bind address.
-No model/provider credentials are read yet. `policy.yaml` now has validated deny-by-default
-request and action rules for the two explicit loopback origins. Replay enforces action grants
-and routes Chromium traffic through a local policy proxy, including every redirect hop and
-one-use destination/body grants for POSTs. Sandbox mode permits only its newly owned origin.
+Only `pnpm discover` reads the provider key; without it the command fails closed with
+`MODEL_NOT_CONFIGURED` and never falls back to a fake model. Tests and `pnpm check` make no
+provider calls. `policy.yaml` has validated deny-by-default request and action rules for the
+two explicit loopback origins. Replay and discovery enforce action grants and route Chromium
+traffic through a local policy proxy, including every redirect hop and one-use
+destination/body grants for POSTs. Sandbox mode permits only its newly owned origin.
 The mock server still has its own local-only protections; those are a separate boundary.
 
 Dependencies are pinned exactly with a committed lockfile. TypeScript 5.9.3 stays within the
 supported range of the pinned TypeScript ESLint parser; the latest compiler is not assumed
 compatible. pnpm's release-age checks are strict, and only esbuild's required install script
-is allowed. AI SDK/provider packages will be selected and installed in Phase 4, not unused now.
+is allowed. The Vercel AI SDK (`ai`) and `@ai-sdk/openai` were added in Phase 4 and are the only
+provider packages; there is no Anthropic or gateway configuration path.
 
 ## Data Handling
 
@@ -163,6 +175,10 @@ is allowed. AI SDK/provider packages will be selected and installed in Phase 4, 
 - Run evidence goes into `artifacts/runs/`, not directly into committed `evidence/`.
 - Business outputs are returned on stdout, never written into the normal evidence log. Do not
   redirect that result into public evidence without reviewing it.
+- The discovery model receives only redacted UI observations, the goal, and the declared input;
+  never credentials, selectors, trusted control identities, form values, source, or fixtures.
+  Discovery transcripts parameterize the member ID and are refused if they contain a known
+  secret or a value read from the UI.
 - Publish only explicitly reviewed and sanitized examples in `evidence/`.
 - Ignore rules reduce accidental commits; they are not a substitute for a secrets review.
 
@@ -192,10 +208,12 @@ unknown-notice acknowledgment even though both notice types share the same POST 
 
 `harbor-profile.ts` is deliberately app-specific: it recognizes permitted controls and their
 effects, not the order of a task. It does not decide to search, open a result, or extract a balance.
-The replay artifact currently supplies that order; Phase 4's LLM will discover it from the UI.
-Authentication and some adapter details also remain Harbor-specific. Supporting another app
-requires adapting its reviewed safety/auth profile, not simply pointing the current code at a
-different URL. The bounded discovery loop should be reusable without embedding UI recipes.
+The replay artifact supplies that order for replay; in discovery the model proposes it from live
+observations and `src/discovery/harbor-goal.ts` holds the acceptance criteria that a completion
+claim must satisfy. Authentication and some adapter details also remain Harbor-specific.
+Supporting another app requires adapting its reviewed safety/auth profile and goal checks, not
+simply pointing the current code at a different URL. The discovery loop itself in
+`src/discovery/engine.ts` contains no UI recipe.
 
 For details and supported limits, see [CONTRACTS.md](docs/CONTRACTS.md).
 
@@ -234,13 +252,49 @@ and recovery behavior. Reviewed actual runs are in [evidence/replay-phase3](evid
 Unknown dialogs currently stop with `UNEXPECTED_DIALOG` and close the session. Actual human
 claim/resume is Phase 6, not a mocked success path in this phase.
 
+## Discovery Demo
+
+With mock credentials and `OPENAI_API_KEY` in `.env`, let the model discover the flow against a
+fresh sandbox:
+
+```bash
+pnpm discover --goal "look up member 12345 and read their current savings balance" --sandbox
+```
+
+The model sees the goal, the declared `memberId`, and redacted observations of the live page,
+and picks one tool per turn (`fill`, `click`, `extract`, `navigate`, `wait`, `complete`,
+`request_human`). The engine classifies each chosen element with the trusted Harbor profile,
+blocks anything the policy does not permit before any request is sent, and accepts a success
+claim only after re-reading the member identity, savings balance, and currency for the declared
+member under one consistent document state. Expected result: `SUCCESS` with
+`savingsBalanceCents: 123456`, `currency: "USD"`, `source: "live"`, and token usage.
+
+```bash
+# Verified business outcome from the live alert, exit 0
+pnpm discover --goal "look up member 99999 and read their current savings balance" --sandbox
+
+# Session loss during discovery is BLOCKED / SESSION_REQUIRED, not an improvised re-login; exit 1
+pnpm discover --goal "look up member 12345 and read their current savings balance" --sandbox --fault session_expired
+
+# Against an already running mock app
+pnpm discover --goal "look up member 67890 and read their current savings balance" --target http://localhost:4000/
+```
+
+Each run writes `events.jsonl`, `discovery.json` (a sanitized transcript with model calls, usage,
+and confirmed action receipts), and a structural snapshot on non-success to `artifacts/runs/`.
+See [DISCOVERY.md](docs/DISCOVERY.md) for flags, tools, enforcement, result codes, and limits.
+The transcript is not a capability artifact; compilation and verification are Phase 5.
+
+Reviewed live runs of exactly these commands are in
+[evidence/discovery-phase4](evidence/discovery-phase4/README.md). The offline tests drive the
+same loop with test-only models and mark them `source: "test"`.
+
 ## Planned Demo
 
 These goal-driven commands are planned, **not implemented yet**:
 
 ```bash
 pnpm agent --goal "look up member 12345 and read their current savings balance"
-pnpm discover --goal "look up member 12345 and read their current savings balance" --target http://localhost:4000
 ```
 
 The default agent entrypoint will choose an existing compatible capability or discover one.

@@ -11,6 +11,7 @@
   },
   "scripts": {
     "mock-app": "node --env-file-if-exists=.env --import tsx mock-app/server.ts",
+    "discover": "node --env-file-if-exists=.env --import tsx src/cli/discover.ts",
     "replay": "node --env-file-if-exists=.env --import tsx src/cli/replay.ts",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
@@ -21,7 +22,9 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:browser"
   },
   "dependencies": {
+    "@ai-sdk/openai": "4.0.60",
     "@hono/node-server": "2.1.1",
+    "ai": "7.0.90",
     "hono": "4.13.7",
     "playwright": "1.63.0",
     "yaml": "2.9.0",

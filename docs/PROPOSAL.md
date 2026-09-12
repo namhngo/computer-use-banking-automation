@@ -155,9 +155,9 @@ evidence/         committed runs: discovery, replay-success, replay-business-out
 | Language | TypeScript (Node 22, pnpm, tsx) | Playwright's home; Zod inference; fast iteration |
 | Browser control | Playwright / Chromium | Scoped locators and node refs; final guard plus DOM dispatch in one browser task; structural failure snapshots, no raw captures |
 | Network guard | Local HTTP policy proxy | Checks every redirect hop and one-use POST destination/body grants; prevents allowed-route substitution after control authorization |
-| LLM layer | Vercel AI SDK + `@ai-sdk/anthropic` | Check compatible stable versions when introduced in Phase 4; pin exact versions and lockfile, rather than assuming the earlier v5 choice |
+| LLM layer | Vercel AI SDK `ai` 7.0.90 + `@ai-sdk/openai` 4.0.60 **[REVISED in Phase 4]** | Pinned exactly with the lockfile. OpenAI Responses API replaced the earlier Anthropic plan; a per-call fetch wrapper captures wire usage/model/response IDs so failed calls still yield receipts |
 | Policy parsing | `yaml` + Zod | Strict YAML without aliases, tags, duplicate keys or implicit policy widening; separate request/action decisions |
-| Model | A supported tool-calling model configured via env | Verify model ID and provider access in Phase 4; record actual usage rather than promise a fixed cost |
+| Model | `DISCOVERY_MODEL` from the `gpt-4.1` / `-mini` / `-nano` family, `OPENAI_API_KEY` from env | Restricted to models verified compatible with the fixed request settings (`store: false`, no parallel tool calls, temperature 0); actual usage is recorded per call rather than a promised fixed cost |
 | Schema / validation | Zod | Runtime validation of artifacts, tool args, results; one source of truth for types + JSON Schema export for reviewers |
 | HTTP (HITL only) | Hono (or bare `node:http`) | Two endpoints; anything heavier is noise |
 | Logging | Custom JSONL writer with redaction | Structured, greppable, no external platform |
@@ -588,7 +588,7 @@ start the next phase until its prerequisites and the review gates above have pas
 | **1. Mock app** (½–1 day) | Hono server: login, member search, member detail (iframe accounts panel); synthetic fixtures, reset hook, fault toggles, risky control blocked from automation | Read-only flow works manually, another member has distinct data, reset restores entry state, faults produce expected states; second business flow deferred |
 | **2. Artifact schema + policy** (completed) | Strict artifact/target/condition/result schemas; explicit input references, integer cents, invocation eligibility, immutable registry; pure policy decisions | Contract, parser, corruption/symlink/concurrent-write, secret-guard, route/action, overlapping-risk, and bounded-recovery tests pass; example remains authored/draft |
 | **3. Surface adapter + replay engine** (completed) | Node-bound refs, scoped targeting, guarded DOM dispatch, mandatory HTTP proxy/POST grants, bounded replay/recovery, CLI, structural evidence | Actual authored-draft runs: success, not-found, recovery, hard failure; stale/ambiguous refs, wrong-frame identity, late control mutation, redirects, cancellation, and evidence tests pass; no LLM dependency |
-| **4. Discovery agent** (1 day) | intent extraction, a11y snapshot with refs, tools, bounded loop, transcript recorder | One real LLM run completes the balance goal against the mock app; transcript + events saved |
+| **4. Discovery agent** (completed) | intent extraction, redacted semantic observation with node refs, seven schema-checked tools, bounded loop with trusted classification and completion verification, sanitized transcript recorder, OpenAI client with per-call receipts, `pnpm discover` CLI | Offline: test-only models complete the goal in varying orders and every unsafe proposal is rejected. Live: `gpt-4.1` completed the balance goal in 9 turns and reported a verified not-found outcome; transcripts + events reviewed in `evidence/discovery-phase4/` |
 | **5. Compiler + verification** (½–1 day) | conservative transcript compilation, explicit handler provenance, fresh-state sandbox verification | Discovered artifact replays with two synthetic member IDs; output/identity checks pass; ambiguous action effects are not pruned; writes are never automatically verified |
 | **6. HITL** (½–1 day) | state machine, loopback HTTP, ownership, navigation-safe human recorder, validated resume | Same-session handoff and completion; negative tests for competing claims, unsafe skip/retry, stale state, blocked actions, and recording after navigation |
 | **7. Capability router** (½ day) | `pnpm agent --goal`: compatible catalog supplied upfront; structured execute/discover/clarify decision | Cold run discovers and verifies without extra execution; warm run replays; ambiguous goals clarify; no rediscovery on policy denial; no automatic duplicate writes |
@@ -602,9 +602,9 @@ time-box, it is the first thing to cut back to "explicit commands only."
 
 ### 10.3 Demo path (target for README)
 
-The goal-driven commands and operator endpoints below remain planned. The implemented
-Phase 3 replay path is shown separately so a draft is never silently promoted or run outside
-verification. Generated evidence stays ignored until reviewed for publication.
+The `pnpm agent` router and operator endpoints below remain planned. The implemented Phase 3
+replay and Phase 4 discovery paths are shown separately so a draft is never silently promoted
+or run outside verification, and a discovery transcript is never mistaken for an artifact. Generated evidence stays ignored until reviewed for publication.
 
 ```bash
 pnpm mock-app                                                   # terminal 1
@@ -615,9 +615,11 @@ pnpm agent --goal "look up member 12345 and read their current savings balance"
 pnpm agent --goal "look up member 67890 and read their current savings balance"
 #   warm: routes to get_member_savings_balance → replay only, no discovery, no UI reasoning
 
-# Planned discovery path (Phase 4/5)
+# Implemented now (Phase 4): live OpenAI discovery against an owned sandbox → sanitized transcript
+# Requires OPENAI_API_KEY in the ignored .env. Compilation into an artifact is Phase 5.
+pnpm discover --goal "look up member 12345 and read their current savings balance" --sandbox
 pnpm discover --goal "look up member 12345 and read their current savings balance" \
-              --target http://localhost:4000                    # real LLM run → artifact
+              --target http://localhost:4000/
 
 # Implemented now: owned sandbox, authored draft, no model
 pnpm replay --artifact examples/get-member-savings-balance.json \

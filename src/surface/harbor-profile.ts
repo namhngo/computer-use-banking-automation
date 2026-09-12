@@ -38,7 +38,8 @@ export async function classifyHarborTarget(handle: ElementHandle<Element>, frame
     return candidate.evaluate((element, actual) => element === actual, handle);
   };
   const formMatches = (path: string, fields: string) => details.destination === `${origin}${path}`
-    && details.method.toLowerCase() === 'post' && details.fieldNames === fields;
+    && details.method.toLowerCase() === 'post' && details.fieldNames === fields
+    && (details.tag !== 'BUTTON' || details.name === '');
 
   if (url.pathname === '/login' && formMatches('/login', 'password,username')) {
     if (details.tag === 'INPUT' && details.name === 'username' && details.type === 'text'
