@@ -5,14 +5,15 @@ The implementation is deliberately incremental and targets one synthetic local w
 
 ## Current Status
 
-Phases 0 and 1 provide tooling and the local Harbor banking sandbox: operator sign-in,
-member search, member details, iframe account balances, and reproducible fault scenarios.
-Verified on Node 22.22.1: lint, strict typechecking, 45 unit/HTTP/CLI tests, and 13 browser tests pass.
-The agent, artifact compiler, replay engine, automation policy enforcement, and human handoff
-are **not implemented yet**. Browser tests are not evidence of LLM discovery.
+Phases 0-2 provide tooling, the local Harbor banking sandbox, typed capability/result contracts,
+input binding, a filesystem capability registry, and pure policy authorization decisions.
+Verified on Node 22.22.1: lint, strict typechecking, 484 unit/contract/HTTP/CLI tests, and 13 browser tests pass.
+The agent, artifact compiler, replay engine, browser policy enforcement, and human handoff
+are **not implemented yet**. The authored example and browser tests are not LLM discovery evidence.
 
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
-Phase 2 defines the artifact/result contracts and the automation policy schema.
+See [the implemented contract guide](docs/CONTRACTS.md) for exact Phase 2 semantics.
+Phase 3 connects the contracts to Playwright, actual policy enforcement, and deterministic replay.
 
 ## Setup
 
@@ -45,7 +46,7 @@ credentials, or browser storage are persisted by the tests.
 | `pnpm mock-app` | Start the local banking sandbox at `http://127.0.0.1:4000` |
 | `pnpm lint` | ESLint with type-aware TypeScript rules and no warnings |
 | `pnpm typecheck` | Strict TypeScript checking without emitting files |
-| `pnpm test` | Configuration, HTTP behavior, fault/reset, and CLI shutdown tests; browser not required |
+| `pnpm test` | Artifact, binding, result, registry, policy, configuration, HTTP, and CLI tests; browser not required |
 | `pnpm test:browser` | Chromium smoke test and real banking UI flows, including mobile and iframe failures |
 | `pnpm browser:install` | Install the Chromium build matching the pinned Playwright version |
 | `pnpm config:check` | Validate optional `.env` configuration without printing values |
@@ -141,9 +142,10 @@ its credentials on startup. No command prints the configured username or passwor
 The browser tests ignore these settings and always run headless with isolated test targets.
 The standalone smoke test runs offline. `mock-app` uses `--port` and `--fault` for its scenario;
 `TARGET_URL` describes the future automation target, not the server's bind address.
-No model/provider credentials are read yet. Configuration validation is not browser
-policy enforcement. `policy.yaml` is a deny-by-default design template only; its parser and
-enforcement will be implemented in Phases 2 and 3.
+No model/provider credentials are read yet. `policy.yaml` now has validated deny-by-default
+request and action rules for the two explicit loopback origins. The policy library can make
+authorization decisions, but no replay/discovery engine enforces them in a browser yet.
+The mock server still has its own local-only protections; those are a separate boundary.
 
 Dependencies are pinned exactly with a committed lockfile. TypeScript 5.9.3 stays within the
 supported range of the pinned TypeScript ESLint parser; the latest compiler is not assumed
@@ -159,6 +161,32 @@ is allowed. AI SDK/provider packages will be selected and installed in Phase 4, 
 - Future run outputs go into `artifacts/`, not directly into committed `evidence/`.
 - Publish only explicitly reviewed and sanitized examples in `evidence/`.
 - Ignore rules reduce accidental commits; they are not a substitute for a secrets review.
+
+## Capability Contracts
+
+The [authored draft example](examples/get-member-savings-balance.json) uses the actual mock
+flow, including the separate View member click and scoped account iframe. Its input is a
+five-digit `memberId`; its outputs are `savingsBalanceCents` (integer cents) and `currency`.
+It contains no concrete member input or login credentials and is not marked verified.
+
+| Module | Phase 2 responsibility |
+|---|---|
+| `src/artifact/schema.ts` | Strict serializable schema plus cross-reference and budget validation |
+| `src/artifact/bindings.ts` | Execution eligibility, exact typed inputs/outputs, symbolic references, strict money parsing |
+| `src/artifact/result.ts` | Success, business outcome, failure, and human-request contracts |
+| `src/artifact/registry.ts` | Immutable private revisions, atomic publication, validated load/list, known-sensitive-value rejection |
+| `src/policy/policy.ts` | Strict YAML loading and separate request/action authorization decisions |
+
+Drafts can be prepared only for explicit read-only sandbox verification. Normal replay
+eligibility requires verified metadata, which the future verification workflow must substantiate.
+Registry revisions cannot be overwritten, even for a status change. Generated artifacts belong
+under ignored `artifacts/capabilities/`; reviewed submission evidence remains a separate step.
+
+Policy action identities must come from a trusted adapter after locating a real control, not
+from a model-supplied key or risk label. The current policy denies sub-account creation and
+unknown-notice acknowledgment even though both notice types share the same POST route.
+
+For details, supported limits, and Phase 3 responsibilities, see [CONTRACTS.md](docs/CONTRACTS.md).
 
 ## Planned Demo
 

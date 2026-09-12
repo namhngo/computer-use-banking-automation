@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "name": "get_member_savings_balance",
+    "version": 1,
+    "description": "Find a member and return their savings balance in integer US cents and its currency.",
+    "status": "draft"
+  },
+  "app": {
+    "appId": "harbor_core",
+    "appVersion": "1.0",
+    "surface": "web",
+    "entryPath": "/members/search",
+    "requiresSession": true
+  },
+  "risk": "read_only",
+  "inputs": {
+    "memberId": {
+      "type": "string", "format": "digits", "minLength": 5, "maxLength": 5,
+      "description": "Member identifier supplied per invocation; preserve leading zeroes.", "sensitive": true
+    }
+  },
+  "outputs": {
+    "savingsBalanceCents": {
+      "type": "number", "integer": true,
+      "description": "Savings balance in integer cents, not floating-point dollars.", "sensitive": true
+    },
+    "currency": {
+      "type": "string", "format": "text", "minLength": 3, "maxLength": 3,
+      "description": "Currency displayed for the savings account.", "sensitive": false
+    }
+  },
+  "steps": [
+    {
+      "id": "open_search", "action": "navigate", "risk": "read_only", "path": "/members/search",
+      "postcondition": {
+        "kind": "visible",
+        "target": { "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Member search" } }] }
+      }
+    },
+    {
+      "id": "fill_member_id", "action": "fill", "risk": "read_only",
+      "target": { "strategies": [
+        { "kind": "role", "role": "textbox", "name": { "source": "literal", "value": "Member ID" } },
+        { "kind": "label", "text": { "source": "literal", "value": "Member ID" } }
+      ] },
+      "value": { "source": "input", "name": "memberId" }
+    },
+    {
+      "id": "search", "action": "click", "risk": "read_only",
+      "target": { "strategies": [{ "kind": "role", "role": "button", "name": { "source": "literal", "value": "Search" } }] },
+      "postcondition": {
+        "kind": "visible",
+        "target": { "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Search results" } }] }
+      }
+    },
+    {
+      "id": "open_member", "action": "click", "risk": "read_only",
+      "target": { "strategies": [{ "kind": "role", "role": "link", "name": { "source": "literal", "value": "View member" } }] },
+      "postcondition": {
+        "kind": "all",
+        "conditions": [
+          { "kind": "visible", "target": { "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Member details" } }] } },
+          { "kind": "text_equals", "target": { "strategies": [{ "kind": "table_cell", "row": { "source": "literal", "value": "Member ID" }, "column": 2 }] }, "expected": { "source": "input", "name": "memberId" } }
+        ]
+      }
+    },
+    {
+      "id": "extract_balance", "action": "extract", "risk": "read_only",
+      "target": {
+        "scope": { "frames": [{ "kind": "css", "selector": "iframe[title='Member accounts']" }] },
+        "strategies": [{ "kind": "table_cell", "row": { "source": "literal", "value": "Savings" }, "column": { "source": "literal", "value": "Current balance" } }]
+      },
+      "output": "savingsBalanceCents", "parser": "usd_cents"
+    },
+    {
+      "id": "extract_currency", "action": "extract", "risk": "read_only",
+      "target": {
+        "scope": { "frames": [{ "kind": "css", "selector": "iframe[title='Member accounts']" }] },
+        "strategies": [{ "kind": "table_cell", "row": { "source": "literal", "value": "Savings" }, "column": { "source": "literal", "value": "Currency" } }]
+      },
+      "output": "currency", "parser": "text"
+    }
+  ],
+  "outcomes": [
+    {
+      "code": "MEMBER_NOT_FOUND", "provenance": { "source": "authored" },
+      "when": { "kind": "text_equals", "target": { "strategies": [{ "kind": "role", "role": "alert", "name": { "source": "literal", "value": "" } }] }, "expected": { "source": "literal", "value": "No member found" } }
+    },
+    {
+      "code": "INVALID_MEMBER_ID", "provenance": { "source": "authored" },
+      "when": { "kind": "text_equals", "target": { "strategies": [{ "kind": "role", "role": "alert", "name": { "source": "literal", "value": "" } }] }, "expected": { "source": "literal", "value": "Member ID must be 5 digits" } }
+    }
+  ],
+  "failures": [
+    {
+      "code": "PERMISSION_DENIED", "provenance": { "source": "authored" },
+      "when": { "kind": "any", "conditions": [
+        { "kind": "visible", "target": { "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Permission denied" } }] } },
+        { "kind": "visible", "target": { "scope": { "frames": [{ "kind": "css", "selector": "iframe[title='Member accounts']" }] }, "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Permission denied" } }] } }
+      ] }
+    },
+    {
+      "code": "APP_ERROR", "provenance": { "source": "authored" },
+      "when": { "kind": "any", "conditions": [
+        { "kind": "visible", "target": { "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Application error" } }] } },
+        { "kind": "visible", "target": { "scope": { "frames": [{ "kind": "css", "selector": "iframe[title='Member accounts']" }] }, "strategies": [{ "kind": "role", "role": "heading", "name": { "source": "literal", "value": "Account service unavailable" } }] } }
+      ] }
+    }
+  ],
+  "recoveries": [
+    {
+      "code": "SESSION_EXPIRED", "provenance": { "source": "authored" }, "maxAttempts": 1,
+      "when": { "kind": "path_equals", "path": "/login" },
+      "recovery": { "kind": "reauthenticate", "resumeAt": "open_search" }
+    },
+    {
+      "code": "SYSTEM_NOTICE", "provenance": { "source": "authored" }, "maxAttempts": 1,
+      "when": { "kind": "visible", "target": { "strategies": [{ "kind": "role", "role": "dialog", "name": { "source": "literal", "value": "System notice" } }] } },
+      "recovery": {
+        "kind": "dismiss",
+        "target": {
+          "scope": { "frames": [], "container": { "kind": "role", "role": "dialog", "name": { "source": "literal", "value": "System notice" } } },
+          "strategies": [{ "kind": "role", "role": "button", "name": { "source": "literal", "value": "OK" } }]
+        },
+        "postcondition": { "kind": "path_equals", "path": "/members/search" }
+      }
+    }
+  ],
+  "limits": { "stepTimeoutMs": 5000, "runTimeoutMs": 60000, "maxRecoveryAttempts": 3 },
+  "checkpoint": {
+    "kind": "all",
+    "conditions": [
+      { "kind": "text_equals", "target": { "strategies": [{ "kind": "table_cell", "row": { "source": "literal", "value": "Member ID" }, "column": 2 }] }, "expected": { "source": "input", "name": "memberId" } },
+      { "kind": "text_equals", "target": { "scope": { "frames": [{ "kind": "css", "selector": "iframe[title='Member accounts']" }] }, "strategies": [{ "kind": "css", "selector": "strong" }] }, "expected": { "source": "input", "name": "memberId" } },
+      { "kind": "text_equals", "target": { "scope": { "frames": [{ "kind": "css", "selector": "iframe[title='Member accounts']" }] }, "strategies": [{ "kind": "table_cell", "row": { "source": "literal", "value": "Savings" }, "column": { "source": "literal", "value": "Currency" } }] }, "expected": { "source": "literal", "value": "USD" } }
+    ]
+  },
+  "provenance": { "source": "authored", "recordedAt": "2026-09-11T00:00:00Z" }
+}

@@ -1,8 +1,49 @@
-# Design template only. Parsing arrives in Phase 2; enforcement in Phase 3.
-# No browser action is authorized by this Phase 0 file.
+# Trusted app-owned policy. Pure decisions only; browser enforcement is separate.
+# targetKey identities come from the trusted adapter/app profile, never the model.
 schemaVersion: 1
 defaultEffect: deny
-allowedOrigins: []
-allowedRoutes: []
-allowedActions: []
+appId: harbor_core
+appVersion: '1.0'
+allowedOrigins:
+  - http://localhost:4000
+  - http://127.0.0.1:4000
+requests:
+  - { method: GET, path: / }
+  - { method: GET, path: /login, query: { reason: [expired] } }
+  - { method: GET, path: /members/search }
+  - { method: GET, path: '/members/:memberId' }
+  - { method: GET, path: '/members/:memberId/accounts' }
+  - { method: GET, path: /notice }
+  - { method: POST, path: /login }
+  - { method: POST, path: /members/search }
+  - { method: POST, path: /notice }
+  - { method: POST, path: /logout }
+actions:
+  - { action: navigate, path: /, risk: read_only }
+  - { action: navigate, path: /login, risk: read_only }
+  - { action: navigate, path: /members/search, risk: read_only }
+  - { action: navigate, path: '/members/:memberId', risk: read_only }
+  - { action: navigate, path: '/members/:memberId/accounts', risk: read_only }
+  - { action: navigate, path: /notice, risk: read_only }
+  - { action: wait, path: /, risk: read_only }
+  - { action: wait, path: /login, risk: read_only }
+  - { action: wait, path: /members/search, risk: read_only }
+  - { action: wait, path: '/members/:memberId', risk: read_only }
+  - { action: wait, path: '/members/:memberId/accounts', risk: read_only }
+  - { action: wait, path: /notice, risk: read_only }
+  # Session credentials are filled at runtime, never stored in this policy.
+  - { action: fill, path: /login, targetKey: login_operator, risk: reversible }
+  - { action: fill, path: /login, targetKey: login_password, risk: reversible }
+  - { action: click, path: /login, targetKey: sign_in, risk: reversible }
+  - { action: click, path: /members/search, targetKey: sign_out, risk: reversible }
+  - { action: fill, path: /members/search, targetKey: member_id, risk: read_only }
+  - { action: click, path: /members/search, targetKey: search_member, risk: read_only }
+  - { action: click, path: /members/search, targetKey: view_member, risk: read_only }
+  - { action: click, path: '/members/:memberId', targetKey: back_to_member_search, risk: read_only }
+  - { action: extract, path: '/members/:memberId', targetKey: member_identity, risk: read_only }
+  - { action: extract, path: '/members/:memberId/accounts', targetKey: member_identity, risk: read_only }
+  - { action: extract, path: '/members/:memberId/accounts', targetKey: savings_balance, risk: read_only }
+  - { action: extract, path: '/members/:memberId/accounts', targetKey: currency, risk: read_only }
+  # Both dialogs POST /notice, but only the recognized system notice is authorized.
+  - { action: click, path: /notice, targetKey: system_notice_ok, risk: reversible }
 irreversibleActions: block

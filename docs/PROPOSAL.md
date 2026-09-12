@@ -4,11 +4,11 @@
 > against the brief; **[NEW]** sections were missing entirely. Rationale for each change is inline
 > so the reasoning can be lifted into `REPORT.md` later.
 
-**Implementation status:** Phases 0 and 1 completed on 2026-09-11. `pnpm check` passes lint,
-strict typechecking, 45 configuration/HTTP/CLI tests, and 13 Chromium tests (including desktop,
-mobile, iframe failure, session recovery, reset isolation, and both shutdown signals).
-See `README.md` for runnable setup, `pnpm mock-app`, environment configuration, and fault commands.
-Phases 2 onward are still planned; no real discovery or replay evidence exists yet.
+**Implementation status:** Phases 0-2 completed on 2026-09-11. `pnpm check` passes lint,
+strict typechecking, 484 unit/contract/HTTP/CLI tests, and 13 Chromium tests. Phase 2 adds
+schemas, explicit binding, a filesystem registry, and pure policy decisions. See
+[CONTRACTS.md](CONTRACTS.md) for exact implemented semantics and `README.md` for setup.
+Phase 3 browser execution/enforcement is next; no real discovery or replay evidence exists yet.
 
 ---
 
@@ -29,9 +29,9 @@ taxonomy, and the HITL seam.
 
 | # | Gap in original draft | Why it matters | Fix |
 |---|---|---|---|
-| 1 | Error taxonomy existed only in the *result type*, not in the *artifact* | Replay cannot know "Member not found" is a business outcome unless the artifact declares it | §3: `outcomes[]` and `recoverable[]` declared in schema |
+| 1 | Error taxonomy existed only in the *result type*, not in the *artifact* | Replay cannot know "Member not found" is a business outcome unless the artifact declares it | §3: `outcomes[]`, `failures[]`, and `recoveries[]` declared in schema |
 | 2 | Transcript → artifact compilation hand-waved | Parameterization, conservative action retention, locator capture | §4.4: explicit compile + sandbox verification replay |
-| 3 | Locator ladder was entirely DOM-based | Brief says "bias toward an approach that still works with no clean DOM" | §4.1 / §5.1: accessibility-tree observation, `visual` strategy in schema as declared seam |
+| 3 | Locator ladder was entirely DOM-based | Brief says "bias toward an approach that still works with no clean DOM" | §4.1 / §5.1: scoped accessibility/structural targeting for web; visual/desktop remain design-only, not accepted schema variants |
 | 4 | Target application unspecified | Owning the target is what makes error-injection evidence possible | §2.3: local legacy-style mock app with fault injection |
 | 5 | Schema missing per-step postconditions, stable step IDs, app identity, provenance, approval, sensitivity flags, extraction parsing | Needed for tenant overrides, redaction, reviewability | §3 |
 | 6 | HITL "same live session" mechanism and "record what the human did" not concrete | Graded as "not just a TODO" | §7 |
@@ -153,6 +153,7 @@ evidence/         committed runs: discovery, replay-success, replay-business-out
 | Language | TypeScript (Node 22, pnpm, tsx) | Playwright's home; Zod inference; fast iteration |
 | Browser control | Playwright | Locators, auto-waiting, accessibility observations, headed mode for HITL; masked failure screenshots rather than raw traces |
 | LLM layer | Vercel AI SDK + `@ai-sdk/anthropic` | Check compatible stable versions when introduced in Phase 4; pin exact versions and lockfile, rather than assuming the earlier v5 choice |
+| Policy parsing | `yaml` + Zod | Strict YAML without aliases, tags, duplicate keys or implicit policy widening; separate request/action decisions |
 | Model | A supported tool-calling model configured via env | Verify model ID and provider access in Phase 4; record actual usage rather than promise a fixed cost |
 | Schema / validation | Zod | Runtime validation of artifacts, tool args, results; one source of truth for types + JSON Schema export for reviewers |
 | HTTP (HITL only) | Hono (or bare `node:http`) | Two endpoints; anything heavier is noise |
@@ -224,146 +225,61 @@ The artifact is the contract between three parties: the replay engine (executes 
 reviewer (approves it), and a calling AI agent (invokes it). It is deliberately **not** a
 transcript.
 
-### 3.1 Shape
+### 3.1 Implemented Phase 2 contract
+
+The earlier illustrative schema is superseded by `src/artifact/schema.ts` and the detailed
+[contract guide](CONTRACTS.md). Keeping one checked example avoids contradictory snippets.
 
 ```text
-CapabilityArtifact
-├── schemaVersion            "1.0" — schema evolution, separate from capability version
-├── identity
-│   ├── name                 snake_case, e.g. get_member_savings_balance
-│   ├── version              integer, bumped on any step/target change
-│   ├── description          human + agent readable
-│   └── status               draft | verified | approved     (gates unattended replay)
-├── app                       [NEW] identity of the surface this was recorded on
-│   ├── appId                e.g. cu-backoffice
-│   ├── appVersion           e.g. 3.2
-│   ├── entryUrl
-│   └── surface              web | legacy-web | desktop
-├── risk                      read_only | reversible | irreversible   (= max over steps)
-├── inputs                    { name: { type, required, description, sensitive, pattern? } }
-├── outputs                   { name: { type, description, sensitive } }
-├── steps[]                   ordered; each has a STABLE id (used by overrides + evidence)
-│   ├── id                   e.g. s3_click_search
-│   ├── action               navigate | click | fill | select | press | extract | wait | dismiss
-│   ├── target               { strategies[] }  — ordered locator ladder, see §5.1
-│   ├── value?               literal or {{inputName}} template
-│   ├── output?              output name (extract only)
-│   ├── parse?               [NEW] none | number | currency | date   (extract only)
-│   ├── risk                 per-step classification
-│   ├── waitFor?             condition before acting (url / text / role visible)
-│   └── postcondition?       [NEW] condition asserting the step "took" — per-step checkpoint
-├── outcomes[]                [NEW] declared business outcomes — detected after any step
-│   └── { code, detector, description }      e.g. MEMBER_NOT_FOUND ← text "No member found"
-├── recoverable[]             [NEW] known runtime conditions + deterministic recovery
-│   └── { code, detector, recovery: dismiss | retry | rerun_steps[] , maxAttempts }
-├── checkpoint                final success condition (goal actually reached)
-└── provenance                [NEW] { discoveryRunId, model, recordedAt, verifiedAt, recordedBy }
+CapabilityArtifact (schemaVersion: 1)
+  identity       name, immutable revision, description, draft | verified
+  app            appId, appVersion, surface: web, entryPath, requiresSession
+  risk           maximum declared business-step risk (not action permission)
+  inputs/outputs required named string/number/boolean definitions + sensitive flags
+  steps          unique IDs; navigate/click/fill/select/extract/wait
+  targets        ordered strategies; optional frame chain and container scope
+  outcomes       business-result conditions + authored/observed provenance
+  failures       hard-stop UI conditions + provenance
+  recoveries     bounded known dismissal or reauthenticate-and-restart
+  limits         step/run timeouts and per-run recovery budget
+  checkpoint     final concrete UI assertions
+  provenance     authored timestamp or discovery run/model reference
+  verification   run/time reference required for verified status
 ```
 
-### 3.2 Example
+All fields are runtime validated; unknown keys, unsupported surfaces/actions, dangling refs,
+duplicate IDs, invalid budgets, and parser/output mismatches are rejected. All business fields
+are required in v1. Arbitrary regexes, optional/default fields, executable expressions, dynamic
+URL templates, desktop selectors, and nested recovery capabilities are deliberately deferred.
 
-Illustrative contract, not an executable fixture. Phase 2 finalizes condition/target unions;
-Phase 3 validates them against the actual mock UI, including explicit iframe scope. The runner
-establishes the declared entry state and session preconditions before the first step.
+### 3.2 Authored example
 
-```json
-{
-  "schemaVersion": "1.0",
-  "identity": {
-    "name": "get_member_savings_balance",
-    "version": 1,
-    "description": "Look up a member by ID and return their current savings balance.",
-    "status": "verified"
-  },
-  "app": { "appId": "cu-backoffice", "appVersion": "3.2", "entryUrl": "http://localhost:4000/", "surface": "legacy-web" },
-  "risk": "read_only",
-  "inputs": {
-    "memberId": { "type": "string", "required": true, "pattern": "^[0-9]{5}$", "sensitive": true,
-                  "description": "Member number as shown in the core system" }
-  },
-  "outputs": {
-    "savingsBalance": { "type": "number", "sensitive": true, "description": "Current savings balance in USD" }
-  },
-  "steps": [
-    {
-      "id": "s1_fill_member_id",
-      "action": "fill",
-      "target": { "strategies": [
-        { "type": "role", "role": "textbox", "name": "Member ID" },
-        { "type": "label", "text": "Member ID" },
-        { "type": "css", "selector": "form[action='/members/search'] input[name='q']" }
-      ]},
-      "value": "{{memberId}}",
-      "risk": "read_only"
-    },
-    {
-      "id": "s2_click_search",
-      "action": "click",
-      "target": { "strategies": [
-        { "type": "role", "role": "button", "name": "Search" },
-        { "type": "text", "text": "Search", "exact": true }
-      ]},
-      "risk": "read_only",
-      "postcondition": { "type": "any_of", "conditions": [
-        { "type": "url_matches", "pattern": "/members/\\d+" },
-        { "type": "text_present", "text": "No member found" }
-      ]}
-    },
-    {
-      "id": "s3_extract_balance",
-      "action": "extract",
-      "target": { "strategies": [
-        { "type": "role", "role": "cell", "name": "Savings balance", "relation": { "sibling": "next" } },
-        { "type": "css", "selector": "#accounts tr:has(td:text-is('Savings')) td:nth-child(3)" }
-      ]},
-      "output": "savingsBalance",
-      "parse": "currency",
-      "risk": "read_only"
-    }
-  ],
-  "outcomes": [
-    { "code": "MEMBER_NOT_FOUND", "detector": { "type": "text_present", "text": "No member found" },
-      "description": "No member exists with the given ID." },
-    { "code": "INVALID_MEMBER_ID", "detector": { "type": "text_present", "text": "Member ID must be 5 digits" },
-      "description": "Input rejected by the application's validation." }
-  ],
-  "recoverable": [
-    { "code": "SESSION_EXPIRED", "detector": { "type": "url_matches", "pattern": "/login" },
-      "recovery": { "type": "rerun_capability", "name": "login" }, "maxAttempts": 1 },
-    { "code": "SYSTEM_NOTICE", "detector": { "type": "role_visible", "role": "dialog", "name": "System notice" },
-      "recovery": { "type": "click", "target": { "strategies": [ { "type": "role", "role": "button", "name": "OK" } ] } },
-      "maxAttempts": 2 }
-  ],
-  "checkpoint": {
-    "type": "all_of",
-    "conditions": [
-      { "type": "member_matches_input", "input": "memberId" },
-      { "type": "account_type_matches", "value": "Savings" },
-      { "type": "output_valid", "output": "savingsBalance" }
-    ]
-  },
-  "provenance": { "discoveryRunId": "run_01J...", "model": "claude-sonnet-4", "recordedAt": "2026-09-12T10:00:00Z", "verifiedAt": "2026-09-12T10:01:30Z" }
-}
-```
+[`examples/get-member-savings-balance.json`](../examples/get-member-savings-balance.json) is
+a schema-validated **draft authored by us**, not LLM discovery or replay evidence. It matches
+Harbor Core v1.0, includes the separate View member click, and extracts the Savings row from
+the account iframe using `table_cell` targeting. Final checks validate both outer and iframe
+member identity and the USD currency.
 
-### 3.3 Design rationale (for REPORT.md)
+The input is a five-digit string member ID. Outputs are `savingsBalanceCents` (integer cents)
+and `currency` (string), avoiding floating-point monetary rounding. References use
+`{ source: input, name: memberId }`, never guessed string substitution or concrete secrets.
 
-- **Outcomes and recoverables are in the artifact** because they are properties of the
-  application. A successful discovery cannot reveal every exception. Record which handlers
-  were observed versus manually authored, and validate authored handlers using fault injection.
-  Do not present unobserved exception behavior as learned by the model.
-- **Stable step IDs** make tenant overrides, evidence, and human resume (`retry_step s2`)
-  possible without positional coupling.
-- **Per-step postconditions** turn "click worked" from an assumption into an assertion, which is
-  what makes failures debuggable (expected X, observed Y, at step s2).
-- **`status` gate:** draft artifacts run only in explicit sandbox verification mode. Verified
-  read-only artifacts may replay on the configured synthetic local target. Approval is a
-  separate future gate for unattended non-sandbox execution, not something the model grants
-  itself. The prototype blocks irreversible actions regardless of artifact status.
-- **`sensitive` flags** drive redaction in logs and evidence at the schema level, not by
-  regex guessing.
-- **`schemaVersion` vs `identity.version`**: schema evolution and capability evolution are
-  independent concerns.
+### 3.3 Design rationale and storage
+
+- Authored and observed exception handlers are distinct; a happy-path run cannot teach every
+  business outcome. Fault tests must validate authored conditions separately.
+- `prepareInvocation` checks exact app/version, inputs, and execution mode. Only read-only
+  drafts can enter sandbox verification; normal replay requires verified read-only metadata.
+  The future runner must still enforce actual UI policy and verify every checkpoint.
+- Credentials are session-manager configuration, not persisted inputs or login capabilities.
+  Reauthentication restarts at the entry navigation, then refills the member ID.
+- The filesystem registry uses the full app/version/name/revision key, rejects overwrites,
+  and publishes complete private files atomically. Status changes require a new revision.
+  Verification metadata is a claim the real verification workflow must substantiate.
+- Sensitive flags guide future evidence redaction; they do not sanitize arbitrary text.
+  Registry persistence rejects supplied known sensitive values rather than altering selectors.
+- `schemaVersion` and capability revision are independent. Unsupported schema versions fail
+  explicitly. No migration layer is needed before a shipped/persisted compatibility requirement.
 
 ---
 
@@ -391,19 +307,19 @@ Desktop and inaccessible surfaces remain design-only extensions, not solved by a
 |---|---|---|
 | `observe` | — | returns snapshot; also auto-called after every action |
 | `click` | `ref` | |
-| `fill` | `ref`, `valueFrom: { input: name } \| { literal: string }` | **forces parameterization** — the agent must say which declared input it is typing |
+| `fill` | `ref`, `value: { source: input, name } \| { source: literal, value }` | Requires explicit parameter references; credentials stay in the session manager |
 | `select` | `ref`, `option` | |
 | `press` | `key` | |
 | `navigate` | `url` | policy-checked against allowlist |
 | `extract` | `ref`, `outputName`, `parse` | declares an output |
-| `dismiss` | `ref` | for interstitials; recorded into `recoverable[]` |
+| `dismiss` | `ref` | for known interstitials; proposed as a bounded entry in `recoveries[]` |
 | `note_outcome` | `code`, `detectorRef` | agent labels a business outcome it encountered |
 | `complete` | `summary` | goal reached; triggers compilation |
 | `request_human` | `reason` | escalation |
 
 Before the loop starts, a single structured-output call turns the goal into a **capability
 intent**: `{ name, description, inputs: { memberId: "12345" }, expectedOutputs }`. The loop
-then knows the parameter names, so `fill` can reference `{ input: "memberId" }` instead of a
+then knows the parameter names, so `fill` can reference `{ source: "input", name: "memberId" }` instead of a
 literal — which is what makes the recorded artifact parameterizable without guessing.
 
 ### 4.3 Stopping conditions
@@ -421,15 +337,17 @@ literal — which is what makes the recorded artifact parameterizable without gu
 2. **Preserve conservatively.** Returning to a URL does not prove intervening actions were
    irrelevant. A timeout also does not prove an action had no effect. Keep state-changing
    actions; only remove confirmed no-ops or reviewed redundancies and verify any simplification.
-3. **Parameterize** via `valueFrom.input` references. Bind member IDs in navigation, selection,
-   targets, and checkpoints as well as fills; reject accidentally embedded sensitive literals.
+3. **Parameterize** via explicit input references in fills, selection, semantic targets, and
+   checkpoints. V1 navigates fixed paths and clicks dynamic links; it does not interpolate
+   inputs into CSS or URL strings. Reject accidentally embedded sensitive literals.
 4. **Derive postconditions** from the observed state change after each action (URL change,
    new heading text) — proposed, then a human can edit.
 5. **Emit** `CapabilityArtifact` with `status: draft`, validate with Zod.
 6. **Verification replay:** for the read-only capability, reset the synthetic sandbox and use
    a fresh browser context at the declared entry point, not the discovery session's final page.
    Validate identity, account type, and output schema. Test another synthetic member to expose
-   hardcoded values. Pass -> `verified`; fail -> retain a draft plus sanitized diagnostics.
+   hardcoded values. Pass -> publish a new `verified` revision; fail -> retain the immutable
+   draft plus sanitized diagnostics. Do not overwrite the saved draft's status/version.
    Never automatically replay writes for verification.
 7. **Return the completed result**, with discovery and verification run IDs and separate
    artifact status. Do not execute again after verification. A completed business goal and a
@@ -447,13 +365,14 @@ than asserted. `complete` is a request to validate success, not authoritative pr
 Each target holds an ordered `strategies[]`. The resolver tries each in order, requires exactly
 one match, and records **which index resolved** in evidence (drift telemetry, see §9).
 
-1. `role` — accessibility role + name (+ optional relation: within / sibling / nth)
-2. `label` — form label association
-3. `text` — visible text, exact or contains
-4. `css` — generated at record time, generic-class-tolerant
-5. `xpath` — legacy fallback
-6. `visual` — **declared, not implemented**: anchor text + offset or normalized coordinates on
-   a screenshot. This is the seam for surfaces with no accessibility tree.
+1. `role`: exact accessibility role and name.
+2. `label`: exact form label association.
+3. `text`: exact visible text.
+4. `table_cell`: exact first-cell row label and header/one-based column, in a unique table.
+5. `css`: a literal structural fallback.
+
+Explicit frame/container scope applies to all strategies. XPath and visual targets are
+design-only extensions and are rejected by the current schema, not silently treated as supported.
 
 No strategy resolving → `FAILURE / TARGET_NOT_FOUND` with the snapshot attached.
 Ambiguous matches stop unless an explicitly scoped strategy resolves the intended element;
@@ -486,18 +405,12 @@ Never automatically dismiss unknown confirmation dialogs.
 
 ### 5.3 Result contract
 
-```ts
-type ReplayResult =
-  | { kind: 'SUCCESS'; outputs: Record<string, unknown>; evidence: EvidenceRef }
-  | { kind: 'BUSINESS_OUTCOME'; code: string; message: string; atStep: string; evidence: EvidenceRef }
-  | { kind: 'FAILURE'; code: FailureCode; atStep: string; expected: string; observed: string;
-      recoveryAttempted: RecoveryRecord[]; evidence: EvidenceRef }
-  | { kind: 'NEEDS_HUMAN'; interventionId: string; reason: string; atStep: string }
-
-type FailureCode = 'TARGET_NOT_FOUND' | 'AMBIGUOUS_TARGET' | 'POSTCONDITION_FAILED'
-  | 'CHECKPOINT_FAILED' | 'TIMEOUT' | 'PERMISSION_DENIED' | 'APP_ERROR'
-  | 'POLICY_BLOCKED' | 'RECOVERY_EXHAUSTED' | 'UNEXPECTED_DIALOG'
-```
+Implemented in `src/artifact/result.ts`: `SUCCESS` with exact typed outputs,
+`BUSINESS_OUTCOME` with an artifact-declared code, `FAILURE` with a sanitized diagnostic,
+or `NEEDS_HUMAN` with an intervention reference. Common metadata carries run ID, step ID,
+safe evidence filenames, and bounded recovery records. Only pre-step failures use a null
+step and can be parsed without an artifact. Success identifies the final step and cannot
+contain exhausted recoveries. See [the contract guide](CONTRACTS.md) for exact invariants.
 
 `RECOVERABLE` is not a terminal result kind: it is an internal event. A recoverable condition
 either recovers (and the run continues, recorded in evidence) or exhausts attempts and becomes
@@ -512,8 +425,11 @@ implementation detail they cannot act on.
   before every action, for discovery *and* replay. Prompt instructions are hints; the adapter is
   the enforcement.
 - **Allowlist config** (`policy.yaml`): permitted origins, permitted path patterns, permitted
-  action types, per-app. Phase 0 supplies a deny-by-default template only; Phase 2 implements
-  schema validation and Phase 3 enforces it. Configuration alone is not a security boundary.
+  action types, per-app. Phase 2 implements strict YAML loading and pure request/action
+  authorization. Origins are exact, paths have only a five-digit member placeholder, and
+  unknown/duplicate query parameters fail closed. Action grants use trusted adapter-derived
+  target identities, not model risk labels. Conflicting overlapping rules are rejected.
+  Phase 3 connects these decisions to the browser; configuration alone is not enforcement.
 - **Pre-request checks:** validate explicit destinations before navigation and install browser
   context request interception before opening pages. Test disallowed requests triggered by
   clicks, form submissions, redirects, frames, and popups. Block service workers in the
@@ -662,7 +578,7 @@ start the next phase until its prerequisites and the review gates above have pas
 |---|---|---|
 | **0. Skeleton** (½ day) | TypeScript, pinned tooling/lockfile, pnpm, Vitest, Playwright/Chromium, validated environment config, deny-by-default policy template, secret/evidence ignore rules, README | Lint + typecheck + meaningful config tests + real browser smoke test pass without model keys; no future-phase stubs presented as working |
 | **1. Mock app** (½–1 day) | Hono server: login, member search, member detail (iframe accounts panel); synthetic fixtures, reset hook, fault toggles, risky control blocked from automation | Read-only flow works manually, another member has distinct data, reset restores entry state, faults produce expected states; second business flow deferred |
-| **2. Artifact schema + policy** (½ day) | Zod schemas for artifact, conditions, targets, results; registry (fs); `PolicyLayer` | Unit tests: valid/invalid artifacts, template binding, allowlist decisions, risk classification |
+| **2. Artifact schema + policy** (completed) | Strict artifact/target/condition/result schemas; explicit input references, integer cents, invocation eligibility, immutable registry; pure policy decisions | Contract, parser, corruption/symlink/concurrent-write, secret-guard, route/action, overlapping-risk, and bounded-recovery tests pass; example remains authored/draft |
 | **3. Surface adapter + replay engine** (1 day) | `PlaywrightAdapter`, scoped refs/locators, waits, detectors, policy enforcement, sanitized evidence | Hand-written artifact: success, not-found, session recovery, hard failure; also stale/ambiguous refs, iframe scope, identity/output validation, blocked network/action paths, and redaction tests; replay has no model dependency |
 | **4. Discovery agent** (1 day) | intent extraction, a11y snapshot with refs, tools, bounded loop, transcript recorder | One real LLM run completes the balance goal against the mock app; transcript + events saved |
 | **5. Compiler + verification** (½–1 day) | conservative transcript compilation, explicit handler provenance, fresh-state sandbox verification | Discovered artifact replays with two synthetic member IDs; output/identity checks pass; ambiguous action effects are not pruned; writes are never automatically verified |
@@ -710,15 +626,16 @@ curl -X POST "http://localhost:4100/interventions/$INTERVENTION_ID/resume" \
 
 ---
 
-## 11. Open questions to settle before Phase 3
+## 11. Decisions carried into Phase 3
 
-1. Extraction locator for table cells: `role=cell` + sibling relation vs. a `table` strategy
-   (`{ type: 'table', rowHeader: 'Savings', column: 'Balance' }`). The latter is more legible
-   for reviewers and closer to how legacy screens are actually read. Lean: add `table` as a
-   first-class strategy.
-2. Should `recoverable.recovery.rerun_capability` (re-login) be allowed to nest, or is one level
-   enough? Lean: one level, hard-coded, to avoid recursive replay.
-3. Vision: send screenshots to the model during discovery or a11y-only? Lean: a11y-only by
-   default, `--vision` flag. Keeps cost and evidence size down; note as a knob in the report.
-4. Headed handoff: the operator must be on the same machine. State this limit and describe CDP
-   endpoint exposure / noVNC as the production path in REPORT.md §5.
+1. Implement `table_cell` with exact row/header matching and explicit iframe scope. Validate
+   uniqueness, stale refs, and requested member identity; never hide ambiguity with `.first()`.
+2. Re-login is a session-manager operation using runtime credentials, not nested capability
+   execution. Reauthentication restarts at the safe entry step and refills inputs.
+3. Build the trusted Harbor target classifier before wiring action authorization. A model
+   cannot supply its own `targetKey`; a known and an unknown notice share a route but not a grant.
+4. Keep vision and desktop execution out of this slice. The schema deliberately rejects
+   unimplemented target kinds; describe future extension in the report without claiming reuse
+   of identical steps across unrelated surfaces.
+5. Headed handoff remains local and same-session. Phase 6 must define safe resumed-result
+   semantics, especially after an exhausted automatic recovery, without deleting audit history.
