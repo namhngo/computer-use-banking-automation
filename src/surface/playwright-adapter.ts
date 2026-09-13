@@ -5,7 +5,7 @@ import { bindText } from '../artifact/bindings.js';
 import { targetSchema } from '../artifact/schema.js';
 import type { Condition, Target } from '../artifact/schema.js';
 import type { SafeSnapshot } from '../evidence/evidence.js';
-import { authorizeAction, authorizeRequest } from '../policy/policy.js';
+import { authorizeAction, authorizeHumanAction, authorizeRequest } from '../policy/policy.js';
 import type { Policy } from '../policy/policy.js';
 import { SurfaceError } from './errors.js';
 import { classifyHarborTarget, elementSignature, harborApp } from './harbor-profile.js';
@@ -26,6 +26,67 @@ export type CapturedControl = {
   /** Private validation data. Never send to the model or persist in a transcript. */
   formValues: Record<string, string>;
 };
+/** Sanitized record of one operator action in the handed-over browser. No values, no URLs. */
+export type HumanAction = { action: 'click' | 'submit'; targetKey?: string; outcome: 'recorded' | 'allowed' | 'blocked'; path: string };
+
+const knownPaths = ['/', '/login', '/members/search', '/members/:memberId', '/members/:memberId/accounts', '/notice'];
+export function canonicalPath(url: string): string {
+  const parsed = URL.parse(url);
+  if (!parsed) return '[unavailable]';
+  const path = parsed.pathname.replace(/\/[0-9]{5}(?=\/|$)/g, '/:memberId');
+  return knownPaths.includes(path) ? path : '[unavailable]';
+}
+
+// Installed in every document. Idle until the adapter reports human control, so automation's
+// own DOM dispatch is untouched. Submissions are held until the trusted side classifies and
+// authorizes the actual submitter, then re-issued natively so submitter values are preserved.
+// Elements cross to Node as a one-time marker attribute the trusted side resolves in the frame.
+const operatorMarkers = { click: 'data-harbor-operator-click', submit: 'data-harbor-operator-submit' } as const;
+const operatorScript = `(() => {
+  if (window.__harborOperatorInstalled) return;
+  window.__harborOperatorInstalled = true;
+  let active = false;
+  let allowNext = null;
+  const markers = ${JSON.stringify(operatorMarkers)};
+  const mark = (element, marker) => {
+    const ref = 'op' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+    element.setAttribute(marker, ref);
+    return ref;
+  };
+  const refresh = () => {
+    const probe = window.__harborOperatorActive;
+    if (typeof probe !== 'function') return Promise.resolve();
+    return probe().then((value) => { active = value === true; }).catch(() => {});
+  };
+  window.__harborOperatorRefresh = refresh;
+  refresh();
+  addEventListener('click', (event) => {
+    if (!active || !(event.target instanceof Element)) return;
+    const report = window.__harborOperatorClick;
+    if (typeof report !== 'function') return;
+    const element = event.target;
+    const ref = mark(element, markers.click);
+    report(ref).catch(() => {}).finally(() => element.removeAttribute(markers.click));
+  }, true);
+  addEventListener('submit', (event) => {
+    if (!active || !(event.target instanceof HTMLFormElement)) return;
+    if (allowNext === event.target) { allowNext = null; return; }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const form = event.target;
+    const submitter = event.submitter instanceof HTMLElement ? event.submitter : null;
+    const decide = window.__harborOperatorSubmit;
+    if (typeof decide !== 'function') return;
+    const element = submitter ?? form;
+    const ref = mark(element, markers.submit);
+    decide(ref).then((allowed) => {
+      element.removeAttribute(markers.submit);
+      if (allowed !== true || !form.isConnected) return;
+      allowNext = form;
+      if (submitter && submitter.form === form) form.requestSubmit(submitter); else form.requestSubmit();
+    }).catch(() => { element.removeAttribute(markers.submit); });
+  }, true);
+})();`;
 
 export class PlaywrightAdapter {
   private epoch = 0;
@@ -37,6 +98,7 @@ export class PlaywrightAdapter {
   private closed = false;
   private closePromise: Promise<void> | undefined;
   private readonly timer: ReturnType<typeof setTimeout>;
+  private humanControl: { onAction: (action: HumanAction) => Promise<void>; revoke?: () => void } | undefined;
 
   private constructor(
     private readonly browser: Browser,
@@ -121,6 +183,13 @@ export class PlaywrightAdapter {
         adapter?.fail('POLICY_BLOCKED');
         void socket.close({ code: 1008, reason: 'Policy blocked' }).catch(() => {});
       });
+      // Operator recording survives navigation because it is bound at the context, not a page.
+      await context.exposeBinding('__harborOperatorActive', () => adapter?.humanControl !== undefined);
+      await context.exposeBinding('__harborOperatorClick', (source, ref: unknown) =>
+        adapter ? adapter.humanClick(source.frame, ref) : Promise.resolve());
+      await context.exposeBinding('__harborOperatorSubmit', (source, ref: unknown) =>
+        adapter ? adapter.humanSubmit(source.frame, ref) : Promise.resolve(false));
+      await context.addInitScript(operatorScript);
       const page = await context.newPage();
       context.setDefaultTimeout(options.timeoutMs);
       adapter = new PlaywrightAdapter(browser, context, page, options.origin, options.policy, proxy,
@@ -437,6 +506,100 @@ export class PlaywrightAdapter {
     const submit = await this.resolve({ strategies: [{ kind: 'role', role: 'button', name: { source: 'literal', value: 'Sign in' } }] }, {});
     await this.act(submit.ref, 'click');
     if (!['/members/search', '/notice'].includes(new URL(this.page.url()).pathname)) throw new SurfaceError('AUTH_FAILED');
+  }
+
+  /**
+   * Hands the same page to an operator. Automation must not dispatch while this is active;
+   * the replay engine enforces that by blocking on the intervention. Recording is sanitized to
+   * action kind, trusted targetKey, and canonical path. Typed values are never captured.
+   */
+  async startHumanControl(onAction: (action: HumanAction) => Promise<void>): Promise<void> {
+    this.health();
+    if (this.humanControl) throw new SurfaceError('HUMAN_CONTROL_ACTIVE');
+    this.humanControl = { onAction };
+    await this.refreshOperatorScripts();
+  }
+
+  /** Returns control to automation and revokes any operator grant that was never consumed. */
+  async stopHumanControl(): Promise<void> {
+    const control = this.humanControl;
+    this.humanControl = undefined;
+    control?.revoke?.();
+    this.invalidate();
+    if (this.closed || this.page.isClosed()) return;
+    await this.refreshOperatorScripts();
+  }
+
+  private async refreshOperatorScripts(): Promise<void> {
+    for (const frame of this.page.frames()) {
+      if (frame.url() === 'about:blank') continue;
+      try {
+        await frame.evaluate('window.__harborOperatorRefresh ? window.__harborOperatorRefresh() : undefined');
+      } catch {
+        // A frame that is navigating gets the current state from its init script instead.
+      }
+    }
+  }
+
+  /** Resolves the page script's one-time marker to the actual node in the reporting frame. */
+  private async operatorElement(frame: Frame, kind: keyof typeof operatorMarkers, ref: unknown): Promise<ElementHandle<Element> | null> {
+    if (typeof ref !== 'string' || !/^op[a-z0-9]{1,40}$/.test(ref) || this.closed || !this.allowed(frame.url())) return null;
+    return frame.$(`css=[${operatorMarkers[kind]}="${ref}"]`);
+  }
+
+  private async humanClick(frame: Frame, ref: unknown): Promise<void> {
+    const control = this.humanControl;
+    let element: ElementHandle<Element> | null = null;
+    try {
+      element = await this.operatorElement(frame, 'click', ref);
+      if (!control || !element) return;
+      const targetKey = await classifyHarborTarget(element, frame, this.origin);
+      await control.onAction({ action: 'click', ...(targetKey === undefined ? {} : { targetKey }), outcome: 'recorded', path: canonicalPath(frame.url()) });
+    } catch {
+      // Recording is best effort; the operator's action itself is governed by the proxy.
+    } finally {
+      await element?.dispose().catch(() => {});
+    }
+  }
+
+  /** Decides one operator form submission. Only `humanActions` rules can grant its POST. */
+  private async humanSubmit(frame: Frame, ref: unknown): Promise<boolean> {
+    const control = this.humanControl;
+    const path = canonicalPath(frame.url());
+    let element: ElementHandle<Element> | null = null;
+    try {
+      element = await this.operatorElement(frame, 'submit', ref);
+      if (!control || !element) return false;
+      const targetKey = await classifyHarborTarget(element, frame, this.origin);
+      const decision = targetKey === undefined ? { allowed: false as const }
+        : authorizeHumanAction(this.policy, { ...harborApp, url: frame.url(), action: 'click', targetKey });
+      const submission = decision.allowed ? await element.evaluate((node) => {
+        const form = node instanceof HTMLFormElement ? node
+          : (node instanceof HTMLButtonElement || node instanceof HTMLInputElement) ? node.form : null;
+        if (!form) return null;
+        const submitter = node instanceof HTMLButtonElement || node instanceof HTMLInputElement ? node : undefined;
+        const body = new URLSearchParams();
+        new FormData(form, submitter).forEach((field, name) => {
+          if (typeof field !== 'string') throw new Error('Unsupported form payload');
+          body.append(name, field);
+        });
+        const url = submitter?.hasAttribute('formaction') ? submitter.formAction : form.action;
+        const method = (submitter?.hasAttribute('formmethod') ? submitter.formMethod : form.method).toLowerCase();
+        return method === 'post' ? { url, body: body.toString() } : null;
+      }) : null;
+      if (!submission) {
+        await control.onAction({ action: 'submit', ...(targetKey === undefined ? {} : { targetKey }), outcome: 'blocked', path });
+        return false;
+      }
+      control.revoke?.();
+      control.revoke = this.proxy.grantPost(submission.url, submission.body);
+      await control.onAction({ action: 'submit', targetKey: targetKey!, outcome: 'allowed', path });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      await element?.dispose().catch(() => {});
+    }
   }
 
   async unknownDialog(): Promise<boolean> {

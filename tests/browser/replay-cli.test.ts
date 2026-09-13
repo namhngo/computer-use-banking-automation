@@ -103,9 +103,20 @@ it.each([
   ['--version', '1'],
   ['get_member_savings_balance'],
   ['--sandbox', '--sandbox'],
+  ['--hitl-port', '4100'],
+  ['--hitl-wait-ms', '60000'],
+  ['--sandbox', '--hitl', '--hitl-port', '70000'],
+  ['--sandbox', '--hitl', '--hitl-wait-ms', '500'],
+  ['--sandbox', '--hitl', '--hitl-wait-ms', '4000000'],
 ])('fails closed on incompatible or invalid options %j', async (...options) => {
   const { result } = await run([...invocation, ...options]);
   expect(result).toMatchObject({ kind: 'FAILURE', code: 'CLI_INVALID', atStep: null, evidence: [] });
+}, 30_000);
+
+it('refuses a human handoff nobody could see: --hitl requires a headed browser', async () => {
+  const { result, stdout } = await run([...invocation, ...verification, '--hitl'], { HEADLESS: 'true' });
+  expect(result).toMatchObject({ kind: 'FAILURE', code: 'CONFIG_ERROR', atStep: null, evidence: [] });
+  expect(stdout).not.toContain('HITL_TOKEN');
 }, 30_000);
 
 it('does not echo secrets supplied in unknown options', async () => {

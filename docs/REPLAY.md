@@ -41,7 +41,8 @@ pnpm replay --artifact examples/get-member-savings-balance.json \
 The results are respectively `BUSINESS_OUTCOME / MEMBER_NOT_FOUND`, success after one recorded
 reauthentication, and `FAILURE / PERMISSION_DENIED`. Failure exits with status 1; success and
 business outcomes exit with status 0. Other mock fault names from the README also work.
-`unexpected_confirm` stops with `UNEXPECTED_DIALOG`; it does not pretend that a human took over.
+`unexpected_confirm` stops with `UNEXPECTED_DIALOG`; with `--hitl` (headed only) it instead
+pauses for a real operator in the same browser session, see [HITL.md](HITL.md).
 
 ## CLI Boundary
 
@@ -183,9 +184,10 @@ Structured business outputs are returned to the caller on stdout, not stored in 
 log. Do not redirect that output into public submission evidence without review. Reviewed
 examples are under [evidence/replay-phase3](../evidence/replay-phase3/README.md).
 
-Unknown dialogs and exhausted recovery currently return failures and close the session. Real
-same-session human claim/resume belongs to Phase 6; no fake intervention ID is created here.
-Headed mode currently lets an operator watch, not take ownership. Phase 6 needs explicit
-controller-mediated authorization for manual POSTs; disabling the proxy is not a handoff.
+Without a handoff broker, unknown dialogs and exhausted recovery return failures and close the
+session; no intervention ID is invented. With `--hitl`, an unknown dialog opens a real
+intervention: the operator claims the same headed browser, their form submissions are authorized
+through the proxy by `policy.yaml › humanActions` (disabling the proxy is not a handoff), and
+automation resumes only after validation. Exhausted recovery remains terminal. See [HITL.md](HITL.md).
 Phase 4 builds LLM-driven discovery on these same bounded surface operations; see
 [DISCOVERY.md](DISCOVERY.md).

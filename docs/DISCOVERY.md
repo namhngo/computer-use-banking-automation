@@ -3,7 +3,9 @@
 Phase 4 lets a tool-calling model choose the next UI action from fresh, redacted observations of
 the real browser. The engine, not the model, authorizes and dispatches every action through the
 same guarded surface and network boundary that Phase 3 replay uses. Compilation of a discovery
-transcript into a replayable artifact (Phase 5), promotion, and human handoff remain later phases.
+transcript into a replayable artifact is Phase 5 ([COMPILE.md](COMPILE.md)); replay-time human
+handoff is Phase 6 ([HITL.md](HITL.md)). Discovery's own `request_human` still ends the run with
+`HUMAN_REQUIRED` rather than pausing: the discovery loop is not wired to the handoff broker.
 
 ## Status
 

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { authorizeAction, authorizeRequest, loadPolicy, parsePolicy } from './policy.js';
+import { authorizeAction, authorizeHumanAction, authorizeRequest, loadPolicy, parsePolicy } from './policy.js';
 import type { Policy } from './policy.js';
 
 const origin = 'http://localhost:4000';
@@ -231,6 +231,44 @@ describe('action decisions', () => {
     const input = { get url() { throw new Error('secret-placeholder'); } };
     expect(authorizeAction(policy, input)).toEqual({ allowed: false, code: 'invalid_input' });
     expect(authorizeRequest(policy, input)).toEqual({ allowed: false, code: 'invalid_input' });
+  });
+});
+
+describe('human action decisions', () => {
+  const human = (path: string, targetKey: string) => ({ appId: 'harbor_core', appVersion: '1.0', url: `${origin}${path}`, action: 'click', targetKey });
+
+  it('permits only the listed operator submissions and never widens automation', () => {
+    expect(authorizeHumanAction(policy, human('/notice', 'operator_notice_acknowledge'))).toEqual({ allowed: true, risk: 'reversible' });
+    // The same node is not an automation action, and automation's own rules are not human rules.
+    expect(authorizeAction(policy, action('/notice', 'click', 'operator_notice_acknowledge'))).toEqual({ allowed: false, code: 'action_denied' });
+    expect(authorizeHumanAction(policy, human('/notice', 'system_notice_ok'))).toEqual({ allowed: false, code: 'action_denied' });
+    expect(authorizeHumanAction(policy, human('/login', 'sign_in'))).toEqual({ allowed: false, code: 'action_denied' });
+    expect(authorizeHumanAction(policy, human('/members/search', 'search_member'))).toEqual({ allowed: false, code: 'action_denied' });
+    expect(authorizeHumanAction(policy, human('/members/12345', 'operator_notice_acknowledge'))).toEqual({ allowed: false, code: 'action_denied' });
+  });
+
+  it('applies the same origin, request, app, and input boundaries', () => {
+    expect(authorizeHumanAction(policy, human('/unknown', 'operator_notice_acknowledge'))).toEqual({ allowed: false, code: 'request_denied' });
+    expect(authorizeHumanAction(policy, { ...human('/notice', 'operator_notice_acknowledge'), url: 'http://evil.example/notice' })).toEqual({ allowed: false, code: 'origin_denied' });
+    expect(authorizeHumanAction(policy, { ...human('/notice', 'operator_notice_acknowledge'), appVersion: '2.0' })).toEqual({ allowed: false, code: 'app_mismatch' });
+    expect(authorizeHumanAction(policy, { ...human('/notice', 'operator_notice_acknowledge'), action: 'fill' })).toEqual({ allowed: false, code: 'invalid_input' });
+    expect(authorizeHumanAction(policy, { ...human('/notice', 'operator_notice_acknowledge'), risk: 'read_only' })).toEqual({ allowed: false, code: 'invalid_input' });
+    expect(authorizeHumanAction(policy, human('/notice', 'Operator Notice'))).toEqual({ allowed: false, code: 'invalid_input' });
+    expect(authorizeHumanAction({ ...policy }, human('/notice', 'operator_notice_acknowledge'))).toEqual({ allowed: false, code: 'invalid_policy' });
+  });
+
+  it('is optional, deny-by-default, and rejects irreversible or duplicate human rules', () => {
+    const withoutHumans: Record<string, unknown> = { ...policy };
+    delete withoutHumans.humanActions;
+    const none = parsePolicy(withoutHumans);
+    expect(authorizeHumanAction(none, human('/notice', 'operator_notice_acknowledge'))).toEqual({ allowed: false, code: 'action_denied' });
+    for (const humanActions of [
+      [{ action: 'click', path: '/notice', targetKey: 'x', risk: 'irreversible' }],
+      [{ action: 'fill', path: '/notice', targetKey: 'x', risk: 'reversible' }],
+      [{ action: 'click', path: '/notice', risk: 'reversible' }],
+      [{ action: 'click', path: '/notice', targetKey: 'x', risk: 'reversible' }, { action: 'click', path: '/notice', targetKey: 'x', risk: 'read_only' }],
+      'operator_notice_acknowledge',
+    ]) expect(() => parsePolicy({ ...policy, humanActions })).toThrow('Invalid policy.');
   });
 });
 

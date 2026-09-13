@@ -47,10 +47,11 @@ const roleSchema = z.enum([
   'term', 'textbox', 'time', 'timer', 'toolbar', 'tooltip', 'tree', 'treegrid',
   'treeitem', 'other',
 ]);
-const pathSchema = z.enum([
+export const evidencePathSchema = z.enum([
   '/', '/login', '/members/search', '/members/:memberId',
   '/members/:memberId/accounts', '/notice', '[blocked]', '[unavailable]',
 ]);
+const pathSchema = evidencePathSchema;
 const snapshotSchema = z.strictObject({
   frames: z.array(z.strictObject({
     index: z.int().nonnegative(),
@@ -67,6 +68,25 @@ const snapshotSchema = z.strictObject({
     truncated: z.boolean(),
   })).max(10),
 });
+
+const interventionStateSchema = z.enum(['waiting', 'human_control', 'validating', 'resumed', 'aborted', 'expired']);
+const timestamp = z.iso.datetime();
+const interventionSchema = z.strictObject({
+  id: identifier,
+  runId: identifier,
+  stepId: identifier,
+  reason: identifier,
+  path: pathSchema,
+  createdAt: timestamp,
+  closedAt: timestamp,
+  state: interventionStateSchema,
+  operatorId: identifier.optional(),
+  transitions: z.array(z.strictObject({ state: interventionStateSchema, at: timestamp, code: identifier.optional() })).max(40),
+  humanActions: z.array(z.strictObject({
+    action: identifier, targetKey: identifier.optional(), outcome: identifier, path: pathSchema, at: timestamp,
+  })).max(200),
+});
+export type InterventionRecord = z.infer<typeof interventionSchema>;
 
 // Strings are accepted at the adapter boundary, then checked against the enums above.
 export type SafeSnapshot = {
@@ -90,6 +110,7 @@ export class EvidenceSink {
   private queue: Promise<void> = Promise.resolve();
   private closed = false;
   private snapshotCount = 0;
+  private interventionCount = 0;
   private readonly filenames = ['events.jsonl'];
 
   private constructor(
@@ -196,6 +217,24 @@ export class EvidenceSink {
       throw new Error('Invalid evidence snapshot.');
     }
     const filename = `snapshot_${++this.snapshotCount}.json`;
+    await this.enqueue(async () => {
+      await writeFile(resolve(this.directory, filename), content, { flag: 'wx', mode: 0o600 });
+      this.filenames.push(filename);
+    });
+    return filename;
+  }
+
+  /** The audit record of one handoff. Structural only: no typed values, URLs, or operator notes. */
+  async intervention(record: InterventionRecord): Promise<string> {
+    if (this.closed) throw new Error('Evidence sink is closed.');
+    if (this.interventionCount >= 5) throw new Error('Evidence intervention limit reached.');
+    let content: string;
+    try {
+      content = this.serialize(interventionSchema.parse(record));
+    } catch {
+      throw new Error('Invalid evidence intervention.');
+    }
+    const filename = `intervention_${++this.interventionCount}.json`;
     await this.enqueue(async () => {
       await writeFile(resolve(this.directory, filename), content, { flag: 'wx', mode: 0o600 });
       this.filenames.push(filename);

@@ -81,9 +81,13 @@ export async function classifyHarborTarget(handle: ElementHandle<Element>, frame
       }
     }
   }
-  if (url.pathname === '/notice' && formMatches('/notice', '') && details.tag === 'BUTTON' && details.type === 'submit'
-    && await sameNode(frame.getByRole('dialog', { name: 'System notice', exact: true })
+  if (url.pathname === '/notice' && formMatches('/notice', '') && details.tag === 'BUTTON' && details.type === 'submit') {
+    if (await sameNode(frame.getByRole('dialog', { name: 'System notice', exact: true })
       .getByRole('button', { name: 'OK', exact: true }))) return 'system_notice_ok';
+    // Known to the profile so an operator can be permitted to acknowledge it; automation is not.
+    if (await sameNode(frame.getByRole('dialog', { name: 'Operator review required', exact: true })
+      .getByRole('button', { name: 'Acknowledge notice', exact: true }))) return 'operator_notice_acknowledge';
+  }
   return undefined;
 }
 

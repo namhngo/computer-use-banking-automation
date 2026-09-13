@@ -9,7 +9,8 @@ strict typechecking, 579 unit/contract/HTTP/CLI tests, and 132 Chromium tests. M
 guarded UI actions, network enforcement, and private evidence now work against the authored
 draft. See [REPLAY.md](REPLAY.md), [CONTRACTS.md](CONTRACTS.md), and the reviewed
 [replay evidence](../evidence/replay-phase3/README.md). LLM discovery, compilation/promotion,
-and human handoff remain future phases; these replay runs are not discovery evidence.
+and human handoff were then delivered in Phases 4-6 (see the phase table in §10.2 and the
+status paragraph in the README); these replay runs are not discovery evidence.
 
 ---
 
@@ -389,7 +390,7 @@ Unsupported target kinds fail clearly rather than pretending another surface was
 validate artifact, inputs, app compatibility, and execution mode
 establish entry state and session preconditions
 for step in artifact.steps:
-    verify run is active                    # human ownership transitions arrive in Phase 6
+    verify run is active and automation owns the browser   # CONTROL_NOT_OWNED otherwise
     evaluate hard-stop, business-outcome, and recovery detectors
     wait for readiness while also checking exceptional states (bounded)
     resolve scoped target uniquely; classify actual node; enforce policy
@@ -406,8 +407,8 @@ Recovery is bounded across the run and uses the same policy path. Every successf
 including notice dismissal, clears partial outputs and restarts this read-only flow at entry.
 This prevents stale values from being returned after recovery changes the page. Nonfatal action
 errors allow a bounded detector inspection, not blind redispatch. Policy/network/deadline
-failure cancels pending operations. Unknown dialogs currently fail and close the session;
-real human escalation/resume is Phase 6 work.
+failure cancels pending operations. Unknown dialogs fail and close the session unless a
+handoff broker is attached, in which case the run pauses for an operator (§7, HITL.md).
 
 ### 5.3 Result contract
 
@@ -472,7 +473,12 @@ implementation detail they cannot act on.
 
 ---
 
-## 7. Human-in-the-loop **[REVISED; planned for Phase 6]**
+## 7. Human-in-the-loop **[IMPLEMENTED in Phase 6; see HITL.md for the as-built behaviour]**
+
+> As built: the trigger is an unknown HTML dialog; `retry_step` restarts the read-only flow at its
+> entry step rather than re-dispatching the paused action; operator POSTs are gated by a
+> `humanActions` policy section through the same proxy; the intervention record has no
+> screenshot (structural snapshot only). Everything else below was implemented as written.
 
 ### 7.1 Control-transfer state machine
 
@@ -522,8 +528,9 @@ duplicate claims and non-owner resume requests. This is the seam the brief asks 
   Known sensitive values are additionally redacted from metadata; arbitrary PII detection is
   not claimed. Business outputs return to the caller, not the persisted log.
 - Reviewed real runs are under `evidence/replay-phase3/`. The original run IDs/timestamps are
-  retained, and the source artifact is explicitly authored/draft. Discovery/model-decision and
-  human-handoff evidence will be added only when those later phases actually run.
+  retained, and the source artifact is explicitly authored/draft. Discovery evidence is under
+  `evidence/discovery-phase4/`, compile/verify under `evidence/compile-phase5/`, and real
+  attended/unattended handoff runs (with `intervention_1.json`) under `evidence/hitl-phase6/`.
 
 ---
 
@@ -590,7 +597,7 @@ start the next phase until its prerequisites and the review gates above have pas
 | **3. Surface adapter + replay engine** (completed) | Node-bound refs, scoped targeting, guarded DOM dispatch, mandatory HTTP proxy/POST grants, bounded replay/recovery, CLI, structural evidence | Actual authored-draft runs: success, not-found, recovery, hard failure; stale/ambiguous refs, wrong-frame identity, late control mutation, redirects, cancellation, and evidence tests pass; no LLM dependency |
 | **4. Discovery agent** (completed) | intent extraction, redacted semantic observation with node refs, seven schema-checked tools, bounded loop with trusted classification and completion verification, sanitized transcript recorder, OpenAI client with per-call receipts, `pnpm discover` CLI | Offline: test-only models complete the goal in varying orders and every unsafe proposal is rejected. Live: `gpt-4.1` completed the balance goal in 9 turns and reported a verified not-found outcome; transcripts + events reviewed in `evidence/discovery-phase4/` |
 | **5. Compiler + verification** (completed) | conservative transcript compilation with observed postconditions and identity checkpoint, `observed` outcome handlers from separate transcripts, fresh-sandbox two-member verification publishing a new verified revision, `pnpm compile` CLI | The live-discovered artifact replays for `12345` and `67890` in fresh sandboxes; v2 verified then replays a third member and the not-found outcome model-free; rejected proposals leave no step; hardcoded literals and fixture names are rejected; drafts with writes are refused; evidence in `evidence/compile-phase5/` |
-| **6. HITL** (½–1 day) | state machine, loopback HTTP, ownership, navigation-safe human recorder, validated resume | Same-session handoff and completion; negative tests for competing claims, unsafe skip/retry, stale state, blocked actions, and recording after navigation |
+| **6. HITL** (completed) | `InterventionBroker` state machine with explicit ownership, loopback Hono API with per-run bearer token, headed same-session handoff, context-bound human recorder, `policy.yaml › humanActions` gate on operator POSTs, validated `retry_step`/`skip_step`/`abort`, paused automation clock, `NEEDS_HUMAN` on expiry, `intervention_N.json` evidence, `pnpm replay --hitl` | Real attended run: pause → refused premature resume → claim → operator acknowledges the notice in the same window → validated resume → `SUCCESS`; real unattended run → `NEEDS_HUMAN`; tests cover competing claims, non-owner resume, unsafe/unprovable skip, dialog-still-present, blocked `sign_in` POST by the human, recording across navigation, expiry, abort; evidence in `evidence/hitl-phase6/` |
 | **7. Capability router** (½ day) | `pnpm agent --goal`: compatible catalog supplied upfront; structured execute/discover/clarify decision | Cold run discovers and verifies without extra execution; warm run replays; ambiguous goals clarify; no rediscovery on policy denial; no automatic duplicate writes |
 | **8. Evidence set + docs** (½–1 day) | reviewed `evidence/`, README (setup, agent and direct commands, offline replay), REPORT with seven exact headings | Fresh-clone demo works; evidence review finds no secrets/raw sensitive captures; README distinguishes completed work from future plans |
 | **9. Stretch** (only if 0–8 solid) | second app variant with tenant overrides *or* multi-run stability score | One shown end-to-end |
@@ -629,19 +636,21 @@ pnpm compile --run <success-runId> --outcome-run <not-found-runId> \
 pnpm replay --artifact examples/get-member-savings-balance.json \
   --inputs '{"memberId":"12345"}' --sandbox --mode verification
 # Add --fault session_expired or --fault permission_denied for exceptional runs.
-# --fault unexpected_confirm currently fails UNEXPECTED_DIALOG; no fake handoff.
+# --fault unexpected_confirm fails UNEXPECTED_DIALOG unless --hitl is given.
 
 # Once a verified registry revision exists, normal model-free replay is also available:
 pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"67890"}'
 
-# Planned operator signaling (Phase 6)
-curl -X POST "http://localhost:4100/interventions/$INTERVENTION_ID/claim" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN"
+# Implemented now: same-session human handoff (Phase 6)
+HEADLESS=false pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault unexpected_confirm --hitl
+curl -X POST "http://127.0.0.1:4100/interventions/$INTERVENTION_ID/claim" \
+  -H "Authorization: Bearer $HITL_TOKEN" -H "Content-Type: application/json" -d '{"operatorId":"you"}'
 #   ... operator acts in the headed browser ...
-curl -X POST "http://localhost:4100/interventions/$INTERVENTION_ID/resume" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"action":"retry_step"}'
-# Resume succeeds only if the expected pre-state and safe-retry conditions are verified.
+curl -X POST "http://127.0.0.1:4100/interventions/$INTERVENTION_ID/resume" \
+  -H "Authorization: Bearer $HITL_TOKEN" -H "Content-Type: application/json" \
+  -d '{"operatorId":"you","action":"retry_step"}'
+# Resume succeeds only if no unknown dialog remains and the step is safe to retry/skip.
 ```
 
 ---
@@ -657,5 +666,6 @@ curl -X POST "http://localhost:4100/interventions/$INTERVENTION_ID/resume" \
 4. Keep vision and desktop execution out of this slice. The schema deliberately rejects
    unimplemented target kinds; describe future extension in the report without claiming reuse
    of identical steps across unrelated surfaces.
-5. Headed handoff remains local and same-session. Phase 6 must define safe resumed-result
-   semantics, especially after an exhausted automatic recovery, without deleting audit history.
+5. Headed handoff remains local and same-session. Phase 6 defined resumed-result semantics as
+   validated restart-at-entry (`retry_step`) or postcondition-proven `skip_step`, with audit
+   history retained; exhausted automatic recovery deliberately stays terminal for now.

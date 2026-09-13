@@ -40,15 +40,27 @@ const policySchema = z.strictObject({
     path: pathSchema,
     risk: riskSchema,
   }).refine(validTarget)).max(100),
+  /**
+   * Form submissions an operator may make in a handed-over browser. Same trusted targetKeys,
+   * same risk ceiling: human handoff widens who acts, never what the prototype permits.
+   */
+  humanActions: z.array(z.strictObject({
+    action: z.literal('click'),
+    targetKey: identifier,
+    path: pathSchema,
+    risk: riskSchema,
+  })).max(100).optional(),
   irreversibleActions: z.literal('block'),
 }).refine((policy) => {
   // Reject duplicate action rules rather than choosing their risk by array order.
-  const keys = policy.actions.map((rule) => `${rule.action}|${rule.path}|${rule.targetKey ?? ''}`);
-  return new Set(keys).size === keys.length
-    && new Set(policy.allowedOrigins).size === policy.allowedOrigins.length
-    && policy.actions.every((rule, index) => policy.actions.slice(index + 1).every((other) =>
+  const unique = (rules: { action: string; path: string; targetKey?: string | undefined; risk: string }[]) => {
+    const keys = rules.map((rule) => `${rule.action}|${rule.path}|${rule.targetKey ?? ''}`);
+    return new Set(keys).size === keys.length && rules.every((rule, index) => rules.slice(index + 1).every((other) =>
       rule.action !== other.action || rule.targetKey !== other.targetKey || rule.risk === other.risk
       || !pathsOverlap(rule.path, other.path)));
+  };
+  return unique(policy.actions) && unique(policy.humanActions ?? [])
+    && new Set(policy.allowedOrigins).size === policy.allowedOrigins.length;
 });
 
 function pathsOverlap(left: string, right: string): boolean {
@@ -169,6 +181,35 @@ export function authorizeAction(policy: Policy, input: unknown): ActionDecision 
     if (!matchesRequest(policy, url, 'GET')) return { allowed: false, code: 'request_denied' };
     const rule = policy.actions.find((rule) => rule.action === action.action
       && rule.targetKey === action.targetKey && matchesPath(rule.path, url.pathname));
+    return rule ? { allowed: true, risk: rule.risk } : { allowed: false, code: 'action_denied' };
+  } catch {
+    return { allowed: false, code: 'invalid_input' };
+  }
+}
+
+const humanActionInputSchema = z.strictObject({
+  appId: identifier, appVersion: z.string().min(1), url: z.string(), action: z.literal('click'), targetKey: identifier,
+});
+
+/**
+ * Decides whether an operator in a handed-over browser may submit a form through the same
+ * proxy. The targetKey is still classified by the trusted profile from the actual node; UI
+ * text and operator intent cannot widen this. Reads (GET navigation) fall under `requests`.
+ */
+export function authorizeHumanAction(policy: Policy, input: unknown): ActionDecision {
+  if (!policies.has(policy)) return { allowed: false, code: 'invalid_policy' };
+  try {
+    const result = humanActionInputSchema.safeParse(input);
+    if (!result.success) return { allowed: false, code: 'invalid_input' };
+    const action = result.data;
+    if (action.appId !== policy.appId || action.appVersion !== policy.appVersion) {
+      return { allowed: false, code: 'app_mismatch' };
+    }
+    const url = parseUrl(action.url);
+    if (!url) return { allowed: false, code: 'invalid_url' };
+    if (!policy.allowedOrigins.includes(url.origin)) return { allowed: false, code: 'origin_denied' };
+    if (!matchesRequest(policy, url, 'GET')) return { allowed: false, code: 'request_denied' };
+    const rule = (policy.humanActions ?? []).find((rule) => rule.targetKey === action.targetKey && matchesPath(rule.path, url.pathname));
     return rule ? { allowed: true, risk: rule.risk } : { allowed: false, code: 'action_denied' };
   } catch {
     return { allowed: false, code: 'invalid_input' };

@@ -7,9 +7,10 @@ import { parseReplayResult } from '../artifact/result.js';
 import type { ReplayResult } from '../artifact/result.js';
 import { EvidenceSink } from '../evidence/evidence.js';
 import type { SafeSnapshot } from '../evidence/evidence.js';
+import type { InterventionBroker, Validation } from '../hitl/interventions.js';
 import { authorizeAction } from '../policy/policy.js';
 import type { Policy } from '../policy/policy.js';
-import { PlaywrightAdapter } from '../surface/playwright-adapter.js';
+import { canonicalPath, PlaywrightAdapter } from '../surface/playwright-adapter.js';
 import { SurfaceError } from '../surface/errors.js';
 import { harborApp } from '../surface/harbor-profile.js';
 
@@ -22,8 +23,19 @@ export async function runReplay(options: {
   credentials?: { username: string; password: string };
   evidenceRoot?: string;
   headless?: boolean;
+  /**
+   * Same-session human handoff. Without it an unknown dialog is a terminal failure. With it the
+   * run pauses, an operator may claim the same browser, and automation resumes only after the
+   * requested resume action is validated against the live page. maxWaitMs bounds the pause.
+   */
+  hitl?: { broker: InterventionBroker; maxWaitMs: number };
 }): Promise<ReplayResult> {
   const runId = `run_${randomUUID().replaceAll('-', '')}`;
+  const hitl = options.hitl;
+  if (hitl && (!Number.isInteger(hitl.maxWaitMs) || hitl.maxWaitMs < 1000 || hitl.maxWaitMs > 3_600_000)) {
+    throw new Error('Invalid human handoff budget.');
+  }
+  let controlOwner: 'automation' | 'human' | 'none' = 'automation';
   const recoveries: ReplayResult['recoveries'] = [];
   const sensitiveValues: string[] = [];
   let sensitiveLength = 0;
@@ -37,6 +49,7 @@ export async function runReplay(options: {
   let result: ReplayResult | undefined;
   const stop = new Error('BUSINESS_OUTCOME');
   const restart = new Error('RESTART');
+  const skip = new Error('SKIP_STEP');
 
   function base() {
     return { runId, atStep, recoveries, evidence: sink?.files ?? [] };
@@ -108,14 +121,16 @@ export async function runReplay(options: {
       runId, sensitiveValues, ...(options.evidenceRoot === undefined ? {} : { root: options.evidenceRoot }),
     });
     await event({ type: 'run_started', phase: options.mode });
-    const deadline = Date.now() + capability.limits.runTimeoutMs;
+    // The automation clock pauses while a human owns the browser; the surface keeps a hard cap.
+    let deadline = Date.now() + capability.limits.runTimeoutMs;
+    const hardDeadline = deadline + (hitl ? hitl.maxWaitMs : 0);
     let cutoff = Math.min(deadline, Date.now() + capability.limits.stepTimeoutMs);
     let timeoutCode = 'AUTH_FAILED';
 
     fallbackCode = 'BROWSER_ERROR';
     adapter = await PlaywrightAdapter.create({
       origin: options.origin, policy: options.policy,
-      timeoutMs: capability.limits.stepTimeoutMs, deadline, onEvent: event,
+      timeoutMs: capability.limits.stepTimeoutMs, deadline: hardDeadline, onEvent: event,
       ...(options.headless === undefined ? {} : { headless: options.headless }),
     });
     const browser = adapter;
@@ -125,6 +140,8 @@ export async function runReplay(options: {
 
     function health() {
       if (evidenceFailed) throw new SurfaceError('EVIDENCE_FAILED');
+      // Ownership is checked before every automation operation; a human-owned browser is never driven.
+      if (controlOwner !== 'automation') throw new SurfaceError('CONTROL_NOT_OWNED');
       browser.health();
       if (Date.now() >= deadline) throw new SurfaceError('RUN_TIMEOUT');
       if (Date.now() >= cutoff) throw new SurfaceError(timeoutCode);
@@ -288,6 +305,132 @@ export async function runReplay(options: {
       if (!knownDialog && await call(() => browser.unknownDialog())) throw new SurfaceError('UNEXPECTED_DIALOG');
     }
 
+    /** Judges an operator's resume request against the live page while they still own it. */
+    async function validateResume(step: CapabilityArtifact['steps'][number], action: 'retry_step' | 'skip_step'): Promise<Validation> {
+      try {
+        browser.health();
+        if (await browser.unknownDialog()) return { accepted: false, code: 'DIALOG_STILL_PRESENT' };
+        if (action === 'retry_step') {
+          // Retry restarts the flow at its read-only entry navigation, so it is only safe for a read-only step.
+          return step.risk === 'read_only' ? { accepted: true } : { accepted: false, code: 'UNSAFE_RETRY' };
+        }
+        // Skipping needs proof the human completed the step; an extraction can never be proven by the page alone.
+        const proof = step.action === 'wait' ? step.condition : step.action === 'extract' ? undefined : step.postcondition;
+        if (!proof) return { accepted: false, code: 'SKIP_NOT_PROVABLE' };
+        return await browser.checkCondition(proof, inputs) ? { accepted: true } : { accepted: false, code: 'POSTCONDITION_NOT_MET' };
+      } catch (error) {
+        return { accepted: false, code: error instanceof SurfaceError ? error.code : 'VALIDATION_FAILED' };
+      }
+    }
+    async function record(write: () => Promise<unknown>) {
+      try {
+        if (evidenceFailed || !sink) throw new Error();
+        await write();
+      } catch {
+        evidenceFailed = true;
+        throw new SurfaceError('EVIDENCE_FAILED');
+      }
+    }
+    /** Pauses automation, offers the same browser to an operator, and applies the validated resume. */
+    async function handoff(step: CapabilityArtifact['steps'][number], reason: string): Promise<never> {
+      if (!hitl) throw new SurfaceError(reason);
+      const broker = hitl.broker;
+      await event({ type: 'intervention_opened', stepId: step.id, code: reason });
+      let snapshot: SafeSnapshot | undefined;
+      try { snapshot = await browser.snapshot(); } catch { /* The operator has the live page; the snapshot is a courtesy. */ }
+      if (snapshot) await record(() => sink!.snapshot(snapshot));
+      const intervention = broker.open({ runId, stepId: step.id, reason, path: canonicalPath(browser.page.url()) }, {
+        onClaim: async () => {
+          controlOwner = 'human';
+          await event({ type: 'intervention_claimed', stepId: step.id, outcome: 'human_control' });
+          await browser.startHumanControl(async (action) => {
+            broker.recordHumanAction(intervention.id, action);
+            await event({ type: 'human_action', stepId: step.id, action: action.action, outcome: action.outcome,
+              ...(action.targetKey === undefined ? {} : { targetKey: action.targetKey }) });
+          });
+        },
+        onRelease: () => browser.stopHumanControl(),
+        validate: (action) => validateResume(step, action),
+      });
+      controlOwner = 'none';
+      const pausedAt = Date.now();
+      let waiting = true;
+      let resolution: Awaited<ReturnType<typeof intervention.wait>>;
+      try {
+        // A browser the operator closes, or a policy violation they trigger, ends the wait early.
+        const watchdog = (async (): Promise<never> => {
+          while (waiting) {
+            await delay(250);
+            if (!waiting) break;
+            try { browser.health(); } catch (error) { await broker.close(intervention.id); throw error; }
+          }
+          return new Promise<never>(() => {});
+        })();
+        resolution = await Promise.race([intervention.wait(hitl.maxWaitMs), watchdog]);
+      } finally {
+        waiting = false;
+        controlOwner = 'automation';
+      }
+      const paused = Date.now() - pausedAt;
+      deadline += paused;
+      cutoff += paused;
+      await event({ type: 'intervention_closed', stepId: step.id, outcome: resolution.kind,
+        ...(resolution.kind === 'resumed' ? { action: resolution.action } : {}) });
+      await record(() => sink!.intervention(intervention.record()));
+      browser.health();
+      if (resolution.kind === 'expired') {
+        result = { ...base(), kind: 'NEEDS_HUMAN', interventionId: intervention.id, reason };
+        throw stop;
+      }
+      if (resolution.kind === 'aborted') throw new SurfaceError('ABORTED_BY_OPERATOR');
+      if (resolution.action === 'skip_step') throw skip;
+      for (const key of Object.keys(outputs)) delete outputs[key];
+      throw restart;
+    }
+    function humanEligible(error: unknown): boolean {
+      if (!hitl || !(error instanceof SurfaceError) || error.code !== 'UNEXPECTED_DIALOG') return false;
+      try { browser.health(); return true; } catch { return false; }
+    }
+
+    async function executeStep(step: CapabilityArtifact['steps'][number]) {
+      await inspect();
+      await event({ type: 'step_started', stepId: step.id, action: step.action });
+      if (step.waitFor) await waitFor(step.waitFor, 'TARGET_NOT_FOUND');
+      if (step.action === 'wait') {
+        await waitFor(step.condition, 'TARGET_NOT_FOUND');
+      } else if (step.action === 'navigate') {
+        await event({ type: 'action_started', stepId: step.id, action: step.action });
+        await dispatch(() => browser.navigate(step.path));
+      } else {
+        const target = await resolve(step.target);
+        await event({ type: 'action_started', stepId: step.id, action: step.action, strategyIndex: target.strategyIndex });
+        const value = step.action === 'fill' || step.action === 'select' ? bindText(step.value, inputs) : undefined;
+        const raw = await dispatch(() => browser.act(target.ref, step.action, value));
+        await inspect();
+        if (step.action === 'extract') {
+          try {
+            if (raw === undefined) throw new Error();
+            outputs[step.output] = parseExtraction(raw, step.parser);
+          } catch {
+            throw new SurfaceError('OUTPUT_INVALID');
+          }
+        }
+      }
+      await inspect();
+      if (step.postcondition) await waitFor(step.postcondition, 'CHECKPOINT_FAILED');
+      await inspect();
+    }
+    async function finish() {
+      cutoff = Math.min(deadline, Date.now() + capability.limits.stepTimeoutMs);
+      await waitFor(capability.checkpoint, 'CHECKPOINT_FAILED');
+      await inspect();
+      try {
+        result = { ...base(), kind: 'SUCCESS', outputs: validateValues(capability.outputs, outputs) };
+      } catch {
+        throw new SurfaceError('OUTPUT_INVALID');
+      }
+    }
+
     fallbackCode = 'AUTH_FAILED';
     if (capability.app.requiresSession) {
       await event({ type: 'action_started', phase: 'prerequisite', action: 'authenticate' });
@@ -300,49 +443,23 @@ export async function runReplay(options: {
       atStep = step.id;
       cutoff = Math.min(deadline, Date.now() + capability.limits.stepTimeoutMs);
       timeoutCode = 'STEP_TIMEOUT';
+      let outcome: 'done' | 'restart' | 'skip' = 'done';
       try {
-        await inspect();
-        await event({ type: 'step_started', stepId: step.id, action: step.action });
-        if (step.waitFor) await waitFor(step.waitFor, 'TARGET_NOT_FOUND');
-        if (step.action === 'wait') {
-          await waitFor(step.condition, 'TARGET_NOT_FOUND');
-        } else if (step.action === 'navigate') {
-          await event({ type: 'action_started', stepId: step.id, action: step.action });
-          await dispatch(() => browser.navigate(step.path));
-        } else {
-          const target = await resolve(step.target);
-          await event({ type: 'action_started', stepId: step.id, action: step.action, strategyIndex: target.strategyIndex });
-          const value = step.action === 'fill' || step.action === 'select' ? bindText(step.value, inputs) : undefined;
-          const raw = await dispatch(() => browser.act(target.ref, step.action, value));
-          await inspect();
-          if (step.action === 'extract') {
-            try {
-              if (raw === undefined) throw new Error();
-              outputs[step.output] = parseExtraction(raw, step.parser);
-            } catch {
-              throw new SurfaceError('OUTPUT_INVALID');
-            }
-          }
-        }
-        await inspect();
-        if (step.postcondition) await waitFor(step.postcondition, 'CHECKPOINT_FAILED');
-        await inspect();
-        await event({ type: 'step_finished', stepId: step.id, action: step.action });
-        index++;
-        if (index === capability.steps.length) {
-          cutoff = Math.min(deadline, Date.now() + capability.limits.stepTimeoutMs);
-          await waitFor(capability.checkpoint, 'CHECKPOINT_FAILED');
-          await inspect();
-          try {
-            result = { ...base(), kind: 'SUCCESS', outputs: validateValues(capability.outputs, outputs) };
-          } catch {
-            throw new SurfaceError('OUTPUT_INVALID');
-          }
+        try {
+          await executeStep(step);
+        } catch (error) {
+          if (!humanEligible(error)) throw error;
+          await handoff(step, 'UNEXPECTED_DIALOG');
         }
       } catch (error) {
-        if (error !== restart) throw error;
-        index = 0;
+        if (error === restart) outcome = 'restart';
+        else if (error === skip) outcome = 'skip';
+        else throw error;
       }
+      if (outcome === 'restart') { index = 0; continue; }
+      await event({ type: 'step_finished', stepId: step.id, action: step.action, ...(outcome === 'skip' ? { outcome: 'human' } : {}) });
+      index++;
+      if (index === capability.steps.length) await finish();
     }
   } catch (error) {
     if (error !== stop) result = failure(errorCode(error));

@@ -24,6 +24,33 @@ describe('EvidenceSink', () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it('persists structural intervention records, redacted and bounded, without overwriting', async () => {
+    const sink = await EvidenceSink.create({ root, runId: 'run_hitl', sensitiveValues: ['12345'] });
+    const record = {
+      id: 'iv_1', runId: 'run_hitl', stepId: 'open_search', reason: 'UNEXPECTED_DIALOG', path: '/notice' as const,
+      createdAt: '2026-09-12T20:00:00.000Z', closedAt: '2026-09-12T20:01:00.000Z', state: 'resumed' as const, operatorId: 'alice',
+      transitions: [{ state: 'waiting' as const, at: '2026-09-12T20:00:00.000Z' }, { state: 'resumed' as const, at: '2026-09-12T20:01:00.000Z', code: 'RETRY' }],
+      humanActions: [{ action: 'submit', targetKey: 'operator_notice_acknowledge', outcome: 'allowed', path: '/notice' as const, at: '2026-09-12T20:00:30.000Z' }],
+    };
+    expect(await sink.intervention(record)).toBe('intervention_1.json');
+    expect(sink.files).toEqual(['events.jsonl', 'intervention_1.json']);
+    const stored = JSON.parse(await readFile(join(sink.directory, 'intervention_1.json'), 'utf8')) as typeof record;
+    expect(stored).toEqual(record);
+    expect((await stat(join(sink.directory, 'intervention_1.json'))).mode & 0o777).toBe(0o600);
+    // Only vocabulary the schema allows: no free text, values, or URLs.
+    for (const invalid of [
+      { ...record, note: 'operator typed 12345' }, { ...record, path: '/members/12345' }, { ...record, operatorId: 'has space' },
+      { ...record, humanActions: [{ ...record.humanActions[0], value: 'x' }] }, { ...record, transitions: Array.from({ length: 41 }, () => record.transitions[0]) },
+      { ...record, state: 'done' },
+    ]) await expect(sink.intervention(invalid as typeof record)).rejects.toThrow('Invalid evidence intervention.');
+    const redacted = await sink.intervention({ ...record, operatorId: 'op12345' });
+    expect(await readFile(join(sink.directory, redacted), 'utf8')).toContain('[REDACTED]');
+    for (let count = 3; count <= 5; count++) await sink.intervention(record);
+    await expect(sink.intervention(record)).rejects.toThrow('Evidence intervention limit reached.');
+    await sink.close();
+    await expect(sink.intervention(record)).rejects.toThrow('Evidence sink is closed.');
+  });
+
   it('writes ordered, complete JSONL events and flushes concurrent writes on close', async () => {
     const sink = await EvidenceSink.create({ root, runId: 'run_123' });
     expect(sink.files).toEqual(['events.jsonl']);

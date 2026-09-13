@@ -46,4 +46,8 @@ actions:
   - { action: extract, path: '/members/:memberId/accounts', targetKey: currency, risk: read_only }
   # Both dialogs POST /notice, but only the recognized system notice is authorized.
   - { action: click, path: /notice, targetKey: system_notice_ok, risk: reversible }
+# Form submissions an operator may make after a same-session handoff. Automation never gets
+# these; the operator never gets more than these. GET navigation stays governed by `requests`.
+humanActions:
+  - { action: click, path: /notice, targetKey: operator_notice_acknowledge, risk: reversible }
 irreversibleActions: block

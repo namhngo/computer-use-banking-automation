@@ -11,20 +11,24 @@ Phase 4 adds a bounded discovery loop in which an OpenAI tool-calling model choo
 redacted live observations while the engine classifies, authorizes, and dispatches each one.
 Phase 5 compiles the resulting transcript into a draft artifact and verifies it by model-free
 replay in fresh sandboxes before publishing a verified revision.
-Verified on Node 22.22.1: lint, strict typechecking, 731 unit/contract/HTTP/CLI tests, and 158 browser tests pass.
+Phase 6 adds same-session human handoff: replay pauses on an unknown dialog, an operator claims
+the very same headed browser through a loopback API, their actions are recorded in sanitized
+form and still bound by policy, and automation resumes only after validating the resume.
+Verified on Node 22.22.1: lint, strict typechecking, 748 unit/contract/HTTP/CLI tests, and 168 browser tests pass.
 
 Genuine live `gpt-4.1` discovery runs (success and not-found) are reviewed and published in
 [evidence/discovery-phase4](evidence/discovery-phase4/README.md). Phase 5 compiles that live
 transcript into a capability artifact, verifies it by model-free replay with two members in fresh
 sandboxes, and publishes a verified revision that the production replay path then executes; see
 [evidence/compile-phase5](evidence/compile-phase5/README.md). Offline tests drive the same
-loops with explicitly test-only models (`source: "test"`). Human handoff and the goal-driven
-router are **not implemented yet**.
+loops with explicitly test-only models (`source: "test"`). Real attended and unattended handoff
+runs are in [evidence/hitl-phase6](evidence/hitl-phase6/README.md). The goal-driven router is
+**not implemented yet**.
 
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
 See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md),
-[the discovery guide](docs/DISCOVERY.md), and [the compile guide](docs/COMPILE.md) for
-implemented semantics and limitations.
+[the discovery guide](docs/DISCOVERY.md), [the compile guide](docs/COMPILE.md), and
+[the handoff guide](docs/HITL.md) for implemented semantics and limitations.
 
 ## Setup
 
@@ -55,7 +59,7 @@ credentials, or browser storage are persisted by the tests.
 | Command | Purpose |
 |---|---|
 | `pnpm mock-app` | Start the local banking sandbox at `http://127.0.0.1:4000` |
-| `pnpm replay ...` | Execute a saved artifact without a model; see the sandbox demo below |
+| `pnpm replay ...` | Execute a saved artifact without a model; `--hitl` enables same-session human handoff; see the demos below |
 | `pnpm discover ...` | Bounded live-model discovery of the balance goal; requires `OPENAI_API_KEY`; see the discovery demo below |
 | `pnpm compile ...` | Compile a discovery transcript into a draft artifact and optionally verify it in fresh sandboxes; no model |
 | `pnpm lint` | ESLint with type-aware TypeScript rules and no warnings |
@@ -121,8 +125,9 @@ pnpm mock-app --fault app_error --port 4001
 | `app_error` | Member detail loads, but the account iframe returns 500 with "Account service unavailable" |
 
 Notices are server-rendered HTML dialogs, not native browser confirmation boxes. Acknowledgment
-preserves the same session and does not modify financial data. Actual automation-to-human
-control transfer will be implemented in Phase 6. A fresh session must acknowledge notices again.
+preserves the same session and does not modify financial data. Replay dismisses the known
+`interstitial` itself; `unexpected_confirm` is the handoff trigger (see the demo below).
+A fresh session must acknowledge notices again.
 Expiry and slowness fire once per sandbox run/reset, not once per member or login.
 
 ### Test Harness Reset
@@ -135,8 +140,8 @@ Each test/run gets its own instance; this is not a concurrent multi-tenant test 
 
 There is intentionally **no HTTP reset endpoint and no JSON member-data API**. The agent will
 receive only UI tools, not the factory/reset hook or direct fixture access. The replay CLI's
-sandbox mode creates a fresh instance and browser context; future human handoff must
-instead keep its existing live browser session.
+sandbox mode creates a fresh instance and browser context; human handoff, by contrast, keeps
+the existing live browser session and hands that same window to the operator.
 
 ## Configuration
 
@@ -256,8 +261,37 @@ The default mode is normal `replay` and requires verified metadata; a draft need
 See [REPLAY.md](docs/REPLAY.md) for flags, guarded DOM dispatch, HTTP-only scope, evidence,
 and recovery behavior. Reviewed actual runs are in [evidence/replay-phase3](evidence/replay-phase3/README.md).
 
-Unknown dialogs currently stop with `UNEXPECTED_DIALOG` and close the session. Actual human
-claim/resume is Phase 6, not a mocked success path in this phase.
+Without `--hitl`, unknown dialogs stop with `UNEXPECTED_DIALOG` and close the session.
+
+## Human Handoff Demo
+
+Trigger the unfamiliar notice and let a person clear it in the same browser window:
+
+```bash
+HEADLESS=false pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification \
+  --fault unexpected_confirm --hitl
+```
+
+The run signs in, meets the "Operator review required" page, prints an intervention ID plus a
+one-time `HITL_TOKEN` to stderr, and pauses. In a second terminal:
+
+```bash
+export HITL_TOKEN=...   # from the first terminal
+curl -sS -X POST http://127.0.0.1:4100/interventions/$ID/claim \
+  -H "Authorization: Bearer $HITL_TOKEN" -H "Content-Type: application/json" -d '{"operatorId":"you"}'
+#   ... click "Acknowledge notice" in the headed Chromium window ...
+curl -sS -X POST http://127.0.0.1:4100/interventions/$ID/resume \
+  -H "Authorization: Bearer $HITL_TOKEN" -H "Content-Type: application/json" \
+  -d '{"operatorId":"you","action":"retry_step"}'
+```
+
+Resume is refused (`409 DIALOG_STILL_PRESENT`) until the notice is really gone; a second
+operator cannot claim or resume; the operator's click and the acknowledgement POST are recorded
+as `human_action` events with the trusted targetKey, and only because `policy.yaml › humanActions`
+lists that targetKey does the proxy let the POST through. The run then finishes with `SUCCESS`.
+Leave it unattended and it ends `NEEDS_HUMAN` with a persisted `intervention_1.json`.
+See [HITL.md](docs/HITL.md) and the real runs in [evidence/hitl-phase6](evidence/hitl-phase6/README.md).
 
 ## Discovery Demo
 

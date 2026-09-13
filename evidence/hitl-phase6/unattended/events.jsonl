@@ -1,0 +1,9 @@
+{"type":"run_started","phase":"verification","ts":"2026-09-13T00:53:36.825Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"action_started","phase":"prerequisite","action":"authenticate","ts":"2026-09-13T00:53:37.521Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"action_authorized","action":"navigate","ts":"2026-09-13T00:53:37.530Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"action_authorized","action":"fill","targetKey":"login_operator","strategyIndex":0,"ts":"2026-09-13T00:53:37.747Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"action_authorized","action":"fill","targetKey":"login_password","strategyIndex":0,"ts":"2026-09-13T00:53:37.788Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"action_authorized","action":"click","targetKey":"sign_in","strategyIndex":0,"ts":"2026-09-13T00:53:37.873Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"intervention_opened","stepId":"open_search","code":"UNEXPECTED_DIALOG","ts":"2026-09-13T00:53:37.960Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"intervention_closed","stepId":"open_search","outcome":"expired","ts":"2026-09-13T00:53:42.968Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}
+{"type":"run_finished","outcome":"NEEDS_HUMAN","ts":"2026-09-13T00:53:43.288Z","runId":"run_cae2f66ee3364f79a6bba99543c1329a"}

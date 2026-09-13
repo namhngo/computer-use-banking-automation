@@ -121,7 +121,10 @@ dismissal, to avoid returning values read before a recovery changed the page.
 - `SUCCESS`: exact typed outputs, final step reached, no exhausted recoveries.
 - `BUSINESS_OUTCOME`: a code declared in this artifact, not an arbitrary failure/recovery code.
 - `FAILURE`: a structured uppercase code, sanitized message, optional expected/observed detail.
-- `NEEDS_HUMAN`: a reason code and intervention ID, not an implementation of handoff itself.
+- `NEEDS_HUMAN`: a reason code and the ID of a persisted intervention nobody resumed in time;
+  the same record (`intervention_N.json`) is in the run's evidence. Attended handoffs do not
+  produce this kind: they continue to `SUCCESS`, `BUSINESS_OUTCOME`, or `FAILURE /
+  ABORTED_BY_OPERATOR`. See [HITL.md](HITL.md).
 
 Every result carries a run ID, step reference, evidence filenames, and recovery records.
 `atStep: null` is allowed only for failures before any step, with no recovery history; those
@@ -130,9 +133,11 @@ Recovery attempts must increment per handler, stay inside both budgets, and neve
 after exhaustion. Result-shape validation does not prove the UI checkpoint actually passed.
 
 Evidence references are simple filenames under the run's directory, never arbitrary paths or
-URLs. Diagnostic strings must already be sanitized by the evidence layer. Phase 6 must define
-how a manually resolved exhausted recovery is represented before accepting resumed success;
-do not erase an exhaustion record merely to make a result pass validation.
+URLs. Diagnostic strings must already be sanitized by the evidence layer. A human-resumed run
+keeps its full audit history: recovery records are never erased, and a resumed `retry_step`
+restarts the read-only flow at entry rather than rewriting what already happened. Exhausted
+recovery is still terminal (not a handoff trigger) precisely because a resumed success after
+exhaustion would need a representation this schema does not yet define.
 
 ## Filesystem Registry
 
