@@ -598,7 +598,7 @@ start the next phase until its prerequisites and the review gates above have pas
 | **4. Discovery agent** (completed) | intent extraction, redacted semantic observation with node refs, seven schema-checked tools, bounded loop with trusted classification and completion verification, sanitized transcript recorder, OpenAI client with per-call receipts, `pnpm discover` CLI | Offline: test-only models complete the goal in varying orders and every unsafe proposal is rejected. Live: `gpt-4.1` completed the balance goal in 9 turns and reported a verified not-found outcome; transcripts + events reviewed in `evidence/discovery-phase4/` |
 | **5. Compiler + verification** (completed) | conservative transcript compilation with observed postconditions and identity checkpoint, `observed` outcome handlers from separate transcripts, fresh-sandbox two-member verification publishing a new verified revision, `pnpm compile` CLI | The live-discovered artifact replays for `12345` and `67890` in fresh sandboxes; v2 verified then replays a third member and the not-found outcome model-free; rejected proposals leave no step; hardcoded literals and fixture names are rejected; drafts with writes are refused; evidence in `evidence/compile-phase5/` |
 | **6. HITL** (completed) | `InterventionBroker` state machine with explicit ownership, loopback Hono API with per-run bearer token, headed same-session handoff, context-bound human recorder, `policy.yaml › humanActions` gate on operator POSTs, validated `retry_step`/`skip_step`/`abort`, paused automation clock, `NEEDS_HUMAN` on expiry, `intervention_N.json` evidence, `pnpm replay --hitl` | Real attended run: pause → refused premature resume → claim → operator acknowledges the notice in the same window → validated resume → `SUCCESS`; real unattended run → `NEEDS_HUMAN`; tests cover competing claims, non-owner resume, unsafe/unprovable skip, dialog-still-present, blocked `sign_in` POST by the human, recording across navigation, expiry, abort; evidence in `evidence/hitl-phase6/` |
-| **7. Capability router** (½ day) | `pnpm agent --goal`: compatible catalog supplied upfront; structured execute/discover/clarify decision | Cold run discovers and verifies without extra execution; warm run replays; ambiguous goals clarify; no rediscovery on policy denial; no automatic duplicate writes |
+| **7. Capability router** (completed) | `pnpm agent --goal`: verified catalog supplied upfront; one guarded structured call → `execute` / `discover` / `clarify` / `unsupported`; application validates name, revision, inputs; cold path composes discover → compile → save draft → fresh-sandbox verify → publish; `src/agent/`, `docs/ROUTER.md` | Real live runs: cold `DISCOVERED` (9-turn discovery, v1 draft, v2 verified, no extra execution; target saw one search); warm `EXECUTED` v2 model-free; missing ID → `CLARIFICATION_REQUIRED`; transfer → `UNSUPPORTED_GOAL`; permission fault → `EXECUTED` with a `FAILURE` result and no rediscovery. Tests cover catalog filtering, decision schemas, SDK single-call guard, unknown capability, `DISCOVERY_NOT_NEEDED`, router error/timeout, unverifiable drafts staying out of the catalog, business-outcome cold runs, CLI argument hygiene; evidence in `evidence/agent-phase7/` |
 | **8. Evidence set + docs** (½–1 day) | reviewed `evidence/`, README (setup, agent and direct commands, offline replay), REPORT with seven exact headings | Fresh-clone demo works; evidence review finds no secrets/raw sensitive captures; README distinguishes completed work from future plans |
 | **9. Stretch** (only if 0–8 solid) | second app variant with tenant overrides *or* multi-run stability score | One shown end-to-end |
 
@@ -609,19 +609,25 @@ time-box, it is the first thing to cut back to "explicit commands only."
 
 ### 10.3 Demo path (target for README)
 
-The `pnpm agent` router and operator endpoints below remain planned. The implemented Phase 3
-replay, Phase 4 discovery, and Phase 5 compile/verify paths are shown separately so a draft is
-never silently promoted or run outside verification, and a discovery transcript is never
-mistaken for an artifact. Generated evidence stays ignored until reviewed for publication.
+Every command below is implemented. The Phase 3 replay, Phase 4 discovery, and Phase 5
+compile/verify paths remain available separately so a draft is never silently promoted or run
+outside verification, and a discovery transcript is never mistaken for an artifact. Generated
+evidence stays ignored until reviewed for publication.
 
 ```bash
 pnpm mock-app                                                   # terminal 1
 
-# Agent-facing path: one goal, the router decides
-pnpm agent --goal "look up member 12345 and read their current savings balance"
-#   cold: discover -> compile -> reset sandbox -> verify -> return completed result; no extra execution
-pnpm agent --goal "look up member 67890 and read their current savings balance"
-#   warm: routes to get_member_savings_balance → replay only, no discovery, no UI reasoning
+# Agent-facing path (Phase 7): one goal, the router decides. Verification needs owned sandboxes,
+# so the cold run uses --sandbox and supplies the second verification member explicitly.
+pnpm agent --goal "look up member 12345 and read their current savings balance" \
+  --sandbox --verify-inputs '{"memberId":"67890"}'
+#   cold: discover -> compile -> save draft v1 -> verify in two fresh sandboxes -> publish v2;
+#   returns the discovery outputs; no extra execution
+pnpm agent --goal "look up member 67890 and read their current savings balance" --sandbox
+#   warm: routes to get_member_savings_balance v2 → replay only, no discovery, no UI reasoning
+pnpm agent --goal "read the current savings balance for one of our members" --sandbox
+#   CLARIFICATION_REQUIRED; a transfer goal is UNSUPPORTED_GOAL; --fault permission_denied is
+#   returned as a replay FAILURE and never rediscovered
 
 # Implemented now (Phase 4): live OpenAI discovery against an owned sandbox → sanitized transcript
 # Requires OPENAI_API_KEY in the ignored .env.
@@ -669,3 +675,9 @@ curl -X POST "http://127.0.0.1:4100/interventions/$INTERVENTION_ID/resume" \
 5. Headed handoff remains local and same-session. Phase 6 defined resumed-result semantics as
    validated restart-at-entry (`retry_step`) or postcondition-proven `skip_step`, with audit
    history retained; exhausted automatic recovery deliberately stays terminal for now.
+6. The router (Phase 7) is a single guarded structured call over the verified catalog and
+   nothing more. The application, not the model, decides whether a named capability exists,
+   whether inputs satisfy the artifact, and whether discovery is even permitted (only with an
+   empty catalog). Failed or denied replays are returned, never rediscovered; a cold run's
+   result is the discovery output and no run follows verification. Observed outcome handlers
+   still come from `pnpm compile --outcome-run`; the cold path does not invent them.

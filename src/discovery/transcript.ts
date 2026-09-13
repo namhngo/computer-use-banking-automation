@@ -1,9 +1,31 @@
 import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import { link, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { targetSchema } from '../artifact/schema.js';
 import { transcriptSchema } from './contracts.js';
 import { createSecretGuard } from './privacy.js';
+
+/** Bounded, symlink-refusing read of a saved transcript file. Returns raw JSON; callers validate. */
+export async function readTranscriptFile(path: string): Promise<unknown> {
+  const maxBytes = 1024 * 1024;
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error('Transcript too large.');
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await file.read(buffer, size, buffer.length - size, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+    }
+    if (size > maxBytes) throw new Error('Transcript too large.');
+    return JSON.parse(buffer.toString('utf8', 0, size)) as unknown;
+  } finally {
+    await file.close();
+  }
+}
 
 export async function writeTranscript(
   directory: string,

@@ -14,7 +14,10 @@ replay in fresh sandboxes before publishing a verified revision.
 Phase 6 adds same-session human handoff: replay pauses on an unknown dialog, an operator claims
 the very same headed browser through a loopback API, their actions are recorded in sanitized
 form and still bound by policy, and automation resumes only after validating the resume.
-Verified on Node 22.22.1: lint, strict typechecking, 748 unit/contract/HTTP/CLI tests, and 168 browser tests pass.
+Phase 7 adds the goal-driven entrypoint `pnpm agent --goal`: one structured model call routes a
+goal to a verified capability (model-free replay), to discovery followed by compile and
+fresh-sandbox verification, to a clarifying question, or to a refusal.
+Verified on Node 22.22.1: lint, strict typechecking, 795 unit/contract/HTTP/CLI tests, and 172 browser tests pass.
 
 Genuine live `gpt-4.1` discovery runs (success and not-found) are reviewed and published in
 [evidence/discovery-phase4](evidence/discovery-phase4/README.md). Phase 5 compiles that live
@@ -22,13 +25,16 @@ transcript into a capability artifact, verifies it by model-free replay with two
 sandboxes, and publishes a verified revision that the production replay path then executes; see
 [evidence/compile-phase5](evidence/compile-phase5/README.md). Offline tests drive the same
 loops with explicitly test-only models (`source: "test"`). Real attended and unattended handoff
-runs are in [evidence/hitl-phase6](evidence/hitl-phase6/README.md). The goal-driven router is
-**not implemented yet**.
+runs are in [evidence/hitl-phase6](evidence/hitl-phase6/README.md). Real live-router runs —
+cold discover→compile→verify, warm replay, clarify, refuse, and a policy denial that was not
+routed around — are in [evidence/agent-phase7](evidence/agent-phase7/README.md). The
+assignment's `REPORT.md` is the remaining deliverable.
 
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
 See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md),
-[the discovery guide](docs/DISCOVERY.md), [the compile guide](docs/COMPILE.md), and
-[the handoff guide](docs/HITL.md) for implemented semantics and limitations.
+[the discovery guide](docs/DISCOVERY.md), [the compile guide](docs/COMPILE.md),
+[the handoff guide](docs/HITL.md), and [the router guide](docs/ROUTER.md) for implemented
+semantics and limitations.
 
 ## Setup
 
@@ -59,6 +65,7 @@ credentials, or browser storage are persisted by the tests.
 | Command | Purpose |
 |---|---|
 | `pnpm mock-app` | Start the local banking sandbox at `http://127.0.0.1:4000` |
+| `pnpm agent --goal "..."` | Goal-driven entrypoint: routes to replay, discovery+verification, clarification, or refusal; requires `OPENAI_API_KEY` for the one routing call; see the agent demo below |
 | `pnpm replay ...` | Execute a saved artifact without a model; `--hitl` enables same-session human handoff; see the demos below |
 | `pnpm discover ...` | Bounded live-model discovery of the balance goal; requires `OPENAI_API_KEY`; see the discovery demo below |
 | `pnpm compile ...` | Compile a discovery transcript into a draft artifact and optionally verify it in fresh sandboxes; no model |
@@ -357,15 +364,35 @@ Every step, locator, and postcondition in the artifact is something the model ac
 acted on; the compiler refuses to guess (see [COMPILE.md](docs/COMPILE.md)). Reviewed copies of
 the compiled artifacts and all four run logs are in [evidence/compile-phase5](evidence/compile-phase5/README.md).
 
-## Planned Demo
+## Agent Demo
 
-These goal-driven commands are planned, **not implemented yet**:
+The goal-driven entrypoint composes the stages above. It needs `OPENAI_API_KEY` for one routing
+call (and for discovery on a cold run); the replay it delegates to is still model-free. Start
+from an empty `artifacts/capabilities/` to see the cold path:
 
 ```bash
-pnpm agent --goal "look up member 12345 and read their current savings balance"
+# Cold: catalog empty → discover → compile → verify in two fresh sandboxes → publish v2.
+# The result is the discovery's own output; nothing executes again after verification.
+pnpm agent --goal "look up member 12345 and read their current savings balance" \
+  --sandbox --verify-inputs '{"memberId":"67890"}'
+#   {"kind":"DISCOVERED", "routing":{"decision":"discover","catalog":[]}, "discovery":{"kind":"SUCCESS",...},
+#    "compiled":{"draft":{...,"version":1},"verified":{...,"version":2},"verificationRuns":[...]}}
+
+# Warm: catalog now lists v2 → execute → model-free replay, no discovery call.
+pnpm agent --goal "look up member 67890 and read their current savings balance" --sandbox
+#   {"kind":"EXECUTED", "routing":{"decision":"execute","catalog":[{"name":"get_member_savings_balance","version":2}]},
+#    "result":{"kind":"SUCCESS","outputs":{"savingsBalanceCents":987654,"currency":"USD"}}}
+
+pnpm agent --goal "read the current savings balance for one of our members" --sandbox
+#   CLARIFICATION_REQUIRED / missing_member_id — no identifier is guessed, no browser starts
+pnpm agent --goal "transfer 500 dollars from member 12345 savings into their checking account" --sandbox
+#   UNSUPPORTED_GOAL / changes_financial_data
+pnpm agent --goal "look up member 12345 and read their current savings balance" --sandbox --fault permission_denied
+#   EXECUTED with a FAILURE result — the denial is reported, never routed around by rediscovery
 ```
 
-The default agent entrypoint will choose an existing compatible capability or discover one.
-Direct replay remains model-free and independently testable. A successful cold discovery
-will not trigger another execution after sandbox verification. Actual live discovery evidence
-and the assignment's `REPORT.md` will be added when those phases are implemented.
+Without `--sandbox` (against `pnpm mock-app` or `--target`) a cold run saves the draft but cannot
+verify it, because verification needs sandboxes this process owns; the draft stays out of the
+catalog. See [ROUTER.md](docs/ROUTER.md) for the decision contract and non-behaviours, and the
+real runs in [evidence/agent-phase7](evidence/agent-phase7/README.md). The assignment's
+`REPORT.md` is the remaining deliverable.

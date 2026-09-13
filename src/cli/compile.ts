@@ -1,6 +1,4 @@
 import { once } from 'node:events';
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
 import { Server } from 'node:http';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -12,6 +10,7 @@ import type { CapabilityKey } from '../artifact/schema.js';
 import { compileTranscript, CompileError } from '../compiler/compile.js';
 import { verifyDraft, type VerificationAttempt } from '../compiler/verify.js';
 import { readConfig } from '../config.js';
+import { readTranscriptFile } from '../discovery/transcript.js';
 import { loadPolicy, parsePolicy } from '../policy/policy.js';
 import { harborApp } from '../surface/harbor-profile.js';
 
@@ -22,26 +21,7 @@ type CompileCliResult =
   | { kind: 'FAILURE'; code: string };
 
 const runIdPattern = /^run_[a-f0-9]{32}$/;
-
-async function readBoundedJson(path: string): Promise<unknown> {
-  const maxBytes = 1024 * 1024;
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > maxBytes) throw new Error();
-    const buffer = Buffer.alloc(maxBytes + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const { bytesRead } = await file.read(buffer, size, buffer.length - size, null);
-      if (bytesRead === 0) break;
-      size += bytesRead;
-    }
-    if (size > maxBytes) throw new Error();
-    return JSON.parse(buffer.toString('utf8', 0, size)) as unknown;
-  } finally {
-    await file.close();
-  }
-}
+const readBoundedJson = readTranscriptFile;
 
 let result: CompileCliResult;
 let setupCode = 'CLI_INVALID';

@@ -1,0 +1,1 @@
+{"agentRunId":"agent_3bf3dfc77e514084b8e36467925e8f13","source":"live","routing":{"decision":"unsupported","modelId":"gpt-4.1-2025-04-14","responseId":"resp_02e12e76ab4b839f016aa5fe9bbd7c87d1b9c4460b181b625b","usage":{"inputTokens":612,"outputTokens":18},"catalog":[{"name":"get_member_savings_balance","version":2}]},"kind":"UNSUPPORTED_GOAL","reason":"changes_financial_data"}

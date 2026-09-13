@@ -21,6 +21,13 @@ operator's acknowledgement in the same window, and resumed to `SUCCESS`; and an 
 that expired into `NEEDS_HUMAN`. Each carries `events.jsonl`, a structural snapshot, and the
 `intervention_1.json` audit record. The operator token is never written anywhere.
 
+Real goal-driven router runs with the live `gpt-4.1` router are in
+[agent-phase7/](agent-phase7/README.md): a cold run that discovered, compiled, verified in two
+fresh sandboxes, and published a verified revision without executing again; a warm run that
+replayed that revision model-free; a clarification; a refusal; and a permission denial that was
+reported rather than rediscovered. Each carries the caller's `agent-result.json` plus the
+delegated stage's sanitized logs and, for the cold run, both artifact revisions.
+
 Generated runs belong in the ignored `artifacts/` directory. Only reviewed, sanitized example
-artifacts and logs will be published here in later phases. Do not add raw model transcripts,
+artifacts and logs are published here. Do not add raw model transcripts,
 browser storage, traces, credentials, or sensitive screenshots.

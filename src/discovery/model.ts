@@ -77,13 +77,23 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-export function createDiscoveryModel({ model, modelId, provider, source, secretValues = [] }: {
+export type ModelConfiguration = {
   model: Exclude<LanguageModel, string>;
   modelId: string;
   provider: string;
   source: 'live' | 'test';
   secretValues?: readonly string[];
-}): DiscoveryModel {
+};
+export type GuardedCall = <T>(instructions: string, data: unknown, signal: AbortSignal, tools: ToolSet,
+  parse: (name: string, input: unknown) => T, namedTool?: string) => Promise<ModelReply<T>>;
+
+/**
+ * One structured, single-turn, receipt-checked model call. Shared by discovery and the
+ * capability router so every model interaction has the same secret guard and audit shape.
+ */
+export function createGuardedCall({ model, modelId, provider, source, secretValues = [] }: ModelConfiguration): {
+  call: GuardedCall; secrets: readonly string[];
+} {
   const secrets = Object.freeze([...new Set(secretValues.filter((value) => value.length > 0))]);
   const guard = createSecretGuard(secrets);
 
@@ -161,6 +171,12 @@ export function createDiscoveryModel({ model, modelId, provider, source, secretV
     }
   }
 
+  return { call, secrets };
+}
+
+export function createDiscoveryModel(configuration: ModelConfiguration): DiscoveryModel {
+  const { call, secrets } = createGuardedCall(configuration);
+  const { source, provider, modelId } = configuration;
   return {
     source, provider, modelId, secretValues: secrets,
     intent: (goal, signal) => call(INTENT_INSTRUCTIONS, { goal }, signal, intentTools, (name, input) => {
@@ -171,7 +187,8 @@ export function createDiscoveryModel({ model, modelId, provider, source, secretV
   };
 }
 
-export function readDiscoveryModel(env: NodeJS.ProcessEnv = process.env): DiscoveryModel {
+/** The live OpenAI model with wire-level receipt capture. Used by discovery and the router alike. */
+export function readLiveModelConfiguration(env: NodeJS.ProcessEnv = process.env): ModelConfiguration {
   const apiKey = env.OPENAI_API_KEY;
   const modelId = env.DISCOVERY_MODEL ?? 'gpt-4.1';
   if (!apiKey?.trim()) throw new Error('Invalid discovery model configuration: OPENAI_API_KEY is required.');
@@ -215,11 +232,12 @@ export function readDiscoveryModel(env: NodeJS.ProcessEnv = process.env): Discov
         },
       },
     });
-    return createDiscoveryModel({
-      model,
-      modelId, provider: 'openai', source: 'live', secretValues: [apiKey],
-    });
+    return { model, modelId, provider: 'openai', source: 'live', secretValues: [apiKey] };
   } catch {
     throw new Error('Invalid discovery model configuration.');
   }
+}
+
+export function readDiscoveryModel(env: NodeJS.ProcessEnv = process.env): DiscoveryModel {
+  return createDiscoveryModel(readLiveModelConfiguration(env));
 }
