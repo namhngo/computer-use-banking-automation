@@ -27,9 +27,11 @@ sandboxes, and publishes a verified revision that the production replay path the
 loops with explicitly test-only models (`source: "test"`). Real attended and unattended handoff
 runs are in [evidence/hitl-phase6](evidence/hitl-phase6/README.md). Real live-router runs —
 cold discover→compile→verify, warm replay, clarify, refuse, and a policy denial that was not
-routed around — are in [evidence/agent-phase7](evidence/agent-phase7/README.md). The
-assignment's `REPORT.md` is the remaining deliverable.
+routed around — are in [evidence/agent-phase7](evidence/agent-phase7/README.md).
 
+[REPORT.md](REPORT.md) is the assignment write-up: architecture, artifact schema, determinism
+and error handling, heterogeneity and multi-tenant design, escalation and handoff, safety, and
+what was cut. It describes only what is built and links each claim to evidence.
 See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
 See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md),
 [the discovery guide](docs/DISCOVERY.md), [the compile guide](docs/COMPILE.md),
@@ -161,10 +163,10 @@ Checks run without `.env`; starting the mock app requires its credential variabl
 | `HEADLESS` | `true` | Exactly `true` or `false` |
 | `MOCK_USERNAME` | None; required for server | Nonblank local operator ID, up to 100 characters |
 | `MOCK_PASSWORD` | None; required for server | Local-only password, 8-200 characters, not all whitespace |
-| `OPENAI_API_KEY` | None; required for `discover` only | Provider key; never printed, redacted from all evidence and model context |
+| `OPENAI_API_KEY` | None; required for `discover` and `agent` only | Provider key; never printed, redacted from all evidence and model context |
 | `DISCOVERY_MODEL` | `gpt-4.1` | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, optionally with the `-2025-04-14` snapshot suffix |
 
-`pnpm config:check`, `pnpm mock-app`, `pnpm replay`, and `pnpm discover` load `.env` if present; existing shell variables take
+`pnpm config:check`, `pnpm mock-app`, `pnpm replay`, `pnpm discover`, `pnpm compile`, and `pnpm agent` load `.env` if present; existing shell variables take
 precedence. `config:check` validates the automation settings only; the mock server validates
 its credentials on startup. No command prints the configured username or password.
 The browser tests ignore these settings and always run headless with isolated test targets.
@@ -394,5 +396,12 @@ pnpm agent --goal "look up member 12345 and read their current savings balance" 
 Without `--sandbox` (against `pnpm mock-app` or `--target`) a cold run saves the draft but cannot
 verify it, because verification needs sandboxes this process owns; the draft stays out of the
 catalog. See [ROUTER.md](docs/ROUTER.md) for the decision contract and non-behaviours, and the
-real runs in [evidence/agent-phase7](evidence/agent-phase7/README.md). The assignment's
-`REPORT.md` is the remaining deliverable.
+real runs in [evidence/agent-phase7](evidence/agent-phase7/README.md).
+
+## Fresh-Clone Check
+
+The model-free path was verified from a fresh clone: `pnpm install --frozen-lockfile`,
+`cp .env.example .env` plus local `MOCK_USERNAME`/`MOCK_PASSWORD`, `pnpm config:check`,
+`pnpm typecheck`, `pnpm test` (795), `pnpm test:browser` (172), then the two sandbox replays
+above (`SUCCESS` and `BUSINESS_OUTCOME / MEMBER_NOT_FOUND`). Without `OPENAI_API_KEY`,
+`pnpm agent` and `pnpm discover` return `FAILURE / MODEL_NOT_CONFIGURED` and never fall back.
