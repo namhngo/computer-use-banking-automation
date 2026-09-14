@@ -1,10 +1,11 @@
 # Capability Router (`pnpm agent --goal`)
 
-The router is the goal-driven entrypoint from proposal §1.2. It is deliberately thin: one model
-call maps *goal → decision*, and everything after that is a pipeline stage that already exists
-and is independently tested (`src/replay`, `src/discovery`, `src/compiler`). The router never
-sees the UI, never chooses locators or steps, and never runs without the application validating
-its decision.
+The router is the goal-driven entrypoint. It is deliberately thin: one model call maps
+*goal → decision*, and everything after that is a pipeline stage that already exists and is
+independently tested (`src/replay`, `src/discovery`, `src/compiler`). The router never sees the
+UI, never chooses locators or steps, and never runs without the application validating its
+decision. Nothing in it names a goal: the catalog is whatever has been learned for the
+application so far, and any read the catalog lacks is learned by discovery.
 
 ## Flow
 
@@ -26,17 +27,19 @@ Implementation: `src/agent/agent.ts` (`runAgent`, `buildCatalog`), `src/agent/co
 
 Input is `{ goal, catalog }`. A catalog entry is name, version, description, risk, and the input
 and output field definitions (type, format, bounds, description). Descriptions come from
-artifacts, which are authored or compiled from trusted goal contracts, never from model text.
-Steps, selectors, checkpoints, and handlers are not sent.
+artifacts, which were compiled from the contract a discovery run declared and then verified.
+Steps, selectors, checkpoints, and handlers are not sent. The prompt tells the model that the
+catalog is what has been learned, not the limit of the application, and that a similar entry
+returning something else (another account, another field) does not fulfil the goal.
 
 Output is exactly one tool call, parsed with strict schemas (`routeToolSchemas`):
 
 | Tool | Input | Application check afterwards |
 |---|---|---|
 | `execute` | `capability`, `version`, `inputs` (string map, ≤ 8 keys) | Name and version must be in the catalog (`CAPABILITY_NOT_FOUND` otherwise). Inputs are validated by the replay engine against the artifact's field definitions (`INPUT_INVALID`). |
-| `discover` | `reason: no_compatible_capability`, `inputs.memberId` (5 digits) | Refused with `DISCOVERY_NOT_NEEDED` if any verified capability exists. Requires a discovery model (`MODEL_NOT_CONFIGURED`). Discovery re-derives its own intent from the goal; the router's `memberId` is used only as the first verification input. |
-| `clarify` | `reason` enum, `question` ≤ 300 chars | Returned verbatim. |
-| `unsupported` | `reason` enum | Returned verbatim. |
+| `discover` | `reason: no_compatible_capability`, `inputs` (identifiers copied verbatim from the goal, ≤ 8) | Requires a discovery model (`MODEL_NOT_CONFIGURED`). Discovery re-derives its own contract from the goal; the router's inputs are treated as sensitive and otherwise unused. |
+| `clarify` | `reason: missing_input \| ambiguous_input \| ambiguous_goal`, `question` ≤ 300 chars | Returned verbatim. |
+| `unsupported` | `reason: changes_data \| not_a_read \| unsafe_request` | Returned verbatim. |
 
 The call goes through the same guarded path as discovery (`createGuardedCall`): temperature 0,
 one step, tool choice required, secret guard on input and output, provider receipt captured at
@@ -53,10 +56,11 @@ an unknown tool fail the call (`ROUTER_ERROR`); the route has its own timeout (`
   process owns, never against the target, and no additional run follows.
 - **No guessed inputs.** Missing or ambiguous identifiers become `clarify`. Type validation is
   not intent validation; the model is told to copy inputs exactly as written.
-- **No discovery when a capability exists.** With one goal family the application enforces
-  this; a future multi-capability catalog would need a finer rule.
+- **No settling for a neighbour.** An existing capability for a different read never blocks
+  learning a new one; the live evidence learns `get_member_checking_balance` next to
+  `get_member_savings_balance` from the same loop.
 - **Drafts stay drafts.** Verification requires owned sandboxes (`--sandbox`) and at least two
-  distinct inputs (goal member plus `--verify-inputs`). Otherwise the draft is saved with
+  distinct inputs (the goal's values plus `--verify-inputs`). Otherwise the draft is saved with
   `VERIFICATION_UNAVAILABLE` / `VERIFICATION_INPUTS_REQUIRED` and stays out of the catalog, so
   the next run discovers again rather than executing something unproven.
 
@@ -72,23 +76,31 @@ delegated stage ended in `SUCCESS` or `BUSINESS_OUTCOME`.
 ## CLI
 
 ```bash
-pnpm agent --goal "..." [--sandbox [--fault <fault>] [--verify-inputs '{"memberId":"67890"}']...]
+pnpm agent --goal "..." [--sandbox [--fault <fault>] [--verify-inputs 67890]...]
                         [--target http://localhost:4000/] [--policy policy.yaml]
                         [--registry artifacts/capabilities] [--evidence-root artifacts/runs]
                         [--max-steps N] [--max-duration-ms N] [--model-timeout-ms N] [--max-tokens N]
+                        [--hitl [--hitl-port 4100] [--hitl-wait-ms 300000]]
 ```
 
-`OPENAI_API_KEY` is required for the router itself (`MODEL_NOT_CONFIGURED` otherwise); the
-replay it delegates to is still model-free. `--fault` and `--verify-inputs` only apply with
-`--sandbox`. Setup failures print a `FAILURE` result with a code and never echo the goal, paths,
-or configuration values.
+`--verify-inputs` takes bare values matched to the discovered contract's inputs in order
+(`67890`), a `name=value` list, or a JSON object. `OPENAI_API_KEY` is required for the router
+itself (`MODEL_NOT_CONFIGURED` otherwise); the replay it delegates to is still model-free.
+`--fault` and `--verify-inputs` only apply with `--sandbox`. `--hitl` needs `HEADLESS=false` and
+offers the same-browser handoff to both discovery and replay ([HITL.md](HITL.md)). Setup
+failures print a `FAILURE` result with a code and never echo the goal, paths, or configuration
+values.
 
 ## Known limitations
 
 - The cold path compiles only the success transcript. Observed business outcomes (e.g. the
   not-found message) are added by `pnpm compile --outcome-run`; until then a not-found member
-  replays to `CHECKPOINT_FAILED` rather than `BUSINESS_OUTCOME` (see
-  [evidence/agent-phase7](../evidence/agent-phase7/README.md)).
+  replays to `CHECKPOINT_FAILED` rather than `BUSINESS_OUTCOME` (compare
+  `evidence/agent/not-found` with `evidence/replay/compiled-member_not_found`).
+- Input names are chosen by the model per discovery (`member_id` in the live runs). Two
+  discoveries of the same read at temperature 0 agreed, and the compiler checks contract shape
+  before merging an outcome transcript, but a later run could still produce a sibling capability
+  with a differently named input rather than a new revision.
 - The catalog is supplied upfront because it is tiny. A tool-based catalog search would need a
   bounded multi-turn loop (proposal §1.2).
 - Clarification is returned, not conversed: the caller re-invokes with a better goal.

@@ -1,48 +1,42 @@
 # Reviewed Evidence
 
-Real runs, committed with their original run IDs and timestamps. Directory names carry the
-development phase they were produced in; the mapping to the assignment's Deliverable 3 is:
+Real runs against the local sandbox, committed with their original run IDs. Every model call
+here is `gpt-4.1` (`source: "live"`); test doubles never produce evidence. Each directory holds
+the CLI's JSON result plus the private run directories it created (`events.jsonl`, structural
+`snapshot_N.json` on non-success, sanitized `discovery.json` transcripts, `intervention_N.json`).
+No credentials, member identifiers, balances or UI text appear in any file; paths spell
+identifiers as `:id`.
 
-| Deliverable 3 asks for | Where |
-|---|---|
-| A saved example artifact | [`compile-phase5/get_member_savings_balance.v2.verified.json`](compile-phase5/get_member_savings_balance.v2.verified.json) (live-discovered, verified) and [`../examples/get-member-savings-balance.json`](../examples/get-member-savings-balance.json) (authored draft) |
-| Logs from a discovery run | [discovery-phase4/](discovery-phase4/README.md) — live `gpt-4.1` |
-| Logs from a replay run | [replay-phase3/](replay-phase3/README.md) and [compile-phase5/](compile-phase5/README.md) — all model-free |
-| A replay hitting an error or exceptional state | `replay-phase3/not-found` (business outcome), `replay-phase3/permission-denied` (hard failure + snapshot), `replay-phase3/session-recovery` (recovered), `compile-phase5/replay-99999` (observed outcome handler) |
+All agent runs were made in one session against one registry, in this order, so the catalog the
+router saw grows as you read down.
 
-## What each directory contains
+| Directory | Command | What it shows |
+| --- | --- | --- |
+| `agent/cold-savings` | `pnpm agent --goal "What is the current savings balance for member 12345?" --sandbox --verify-inputs 67890` | Empty catalog → `discover`. The model declared `get_member_savings_balance { member_id → savings_balance }`, learned the flow in 6 turns, the transcript compiled to v1 and verified in two fresh sandboxes as v2. Result carries the answer; nothing ran again. |
+| `agent/cold-checking` | `pnpm agent --goal "How much does member 67890 have in their checking account?" --sandbox --verify-inputs 12345` | A read the previous design could not express. Router saw the savings capability and still chose `discover`; the same loop learned `get_member_checking_balance { member_id → checking_account_balance }` in 7 turns, verified as v2. No code or policy changed between this run and the last. |
+| `agent/warm-savings`, `agent/warm-checking` | same goals, other members | `execute`: model-free replay of the verified revision, correct outputs. |
+| `agent/not-found` | member 99999 | `execute` of the agent-compiled savings capability, which has no observed outcome yet: `FAILURE / CHECKPOINT_FAILED` at the search click, nothing guessed. Compare `replay/compiled-member_not_found`. |
+| `agent/denied` | `--fault permission_denied` | `execute` returning the replay `FAILURE`; the router does not rediscover around a denial. |
+| `agent/unsupported` | "Transfer 50 dollars …" | `UNSUPPORTED_GOAL / changes_data`, no browser. |
+| `agent/clarify` | "What is the savings balance?" | `CLARIFICATION_REQUIRED / missing_input` with a one-line question, no browser. |
+| `agent/cold-not-found` | member 99999, fresh registry | Discovery ending in a verified business outcome (`NO_MEMBER_FOUND`, a code the model chose, confirmed on the live message after a real submission). Not compiled (`compiled: null`). |
+| `compile` | `pnpm compile --run <cold-savings> --outcome-run <cold-not-found> --verify --sandbox --verify-inputs '{"member_id":"12345"}' --verify-inputs '{"member_id":"67890"}'` | The compile CLI merging an observed outcome into the draft (the two transcripts' contracts match), then `VERIFIED` v2. The v1 draft and v2 verified artifacts are included. |
+| `replay/compiled-*` | `pnpm replay get_member_savings_balance --version 2 --inputs '{"member_id":"12345"}' --sandbox --fault <fault>` | The compiled+verified artifact: `none` → `SUCCESS`; `member_not_found` → `BUSINESS_OUTCOME / NO_MEMBER_FOUND`; `permission_denied` and `session_expired` → `FAILURE / CHECKPOINT_FAILED` (a compiled artifact has no authored recoveries). |
+| `replay/authored-*` | `pnpm replay --artifact examples/get-member-savings-balance.json --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault <fault>` | The hand-written draft with an authored recovery: `session_expired` recovers (`SESSION_EXPIRED` recovery, then `SUCCESS`). Needs no model key. |
+| `hitl/discovery-handoff` | `pnpm exec tsx scripts/hitl-discovery-demo.ts` | Same-browser handoff **during discovery** with the live model: an unfamiliar dialog after sign-in pauses the loop at turn 1, operator `alice` claims over the HTTP console, acknowledges the notice in that browser (`human_action` events, `intervention_1.json`), resumes with `retry_step`, and the model finishes the read (`SUCCESS`, 8 turns). `operator.log` is the console exchange. The transcript carries `HUMAN_RESUMED`; `pnpm compile` refuses it with `COMPILE_HUMAN_ASSISTED`. |
+| `capabilities` | — | The four artifacts the agent runs produced (savings v1/v2, checking v1/v2). |
 
-**[replay-phase3/](replay-phase3/README.md)** — four model-free replays of the authored draft
-covering every result kind: success, `MEMBER_NOT_FOUND` business outcome, a bounded session-expiry
-recovery, and a `PERMISSION_DENIED` hard failure with a structural DOM snapshot.
+The attended and unattended replay handoffs (claim, blocked operator submission, abort, expiry)
+are exercised by `tests/browser/hitl.test.ts` against the same engine; they produce identical
+evidence shapes but are not committed here because their operator is the test itself.
 
-**[discovery-phase4/](discovery-phase4/README.md)** — genuine live `gpt-4.1` discovery: a success
-run (including one premature completion claim the engine rejected) and a not-found business
-outcome with a structural snapshot. Contains `events.jsonl` and the sanitized `discovery.json`
-transcript only. Offline test-model runs are marked `source: "test"` and deliberately not
-published here.
+## Mapping to the brief's deliverable
 
-**[compile-phase5/](compile-phase5/README.md)** — the full discover → compile → verify → replay
-thread: the artifact compiled from that live transcript, its two fresh-sandbox verification runs,
-the published verified revision, and two model-free production replays of it (a third member the
-model never saw, plus the not-found outcome).
-
-**[hitl-phase6/](hitl-phase6/README.md)** — real same-session human handoff: an attended headed run
-that paused on the unfamiliar notice, refused premature resumes, recorded the operator's
-acknowledgement in that same window, and resumed to `SUCCESS`; plus an unattended run that expired
-into `NEEDS_HUMAN`. Each carries `events.jsonl`, a structural snapshot, and the
-`intervention_1.json` audit record. The operator token is never written anywhere.
-
-**[agent-phase7/](agent-phase7/README.md)** — goal-driven router runs with the live `gpt-4.1`
-router: a cold run that discovered, compiled, verified in two fresh sandboxes, and published a
-verified revision without executing again; a warm run that replayed that revision model-free; a
-clarification; a refusal; and a permission denial that was reported rather than rediscovered. Each
-carries the caller's `agent-result.json` plus the delegated stage's sanitized logs, and for the
-cold run both artifact revisions.
-
-## Handling
-
-Generated runs belong in the ignored `artifacts/` directory. Only reviewed, sanitized examples are
-published here. Evidence is structural by construction — routes, trusted target keys, strategy
-indices, result codes — with no raw values, URLs, selectors, or exception objects. Do not add raw
-model transcripts, browser storage, traces, credentials, or sensitive screenshots.
+| Asked for | Where |
+| --- | --- |
+| Agent discovering a flow from a goal | `agent/cold-savings`, `agent/cold-checking`, `hitl/discovery-handoff` (`discovery/discovery.json`, `events.jsonl`) |
+| The resulting artifact | `capabilities/`, `compile/` |
+| Model-free replay of that artifact | `agent/warm-*`, `replay/compiled-none`, `compile/verification-*` |
+| Failure and outcome handling | `replay/compiled-*`, `replay/authored-*`, `agent/not-found`, `agent/denied` |
+| Human handoff | `hitl/discovery-handoff` |
+| Refusals | `agent/unsupported`, `agent/clarify` |

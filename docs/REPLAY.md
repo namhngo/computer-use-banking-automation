@@ -1,7 +1,6 @@
-# Phase 3: Deterministic Replay
+# Deterministic Replay
 
-Phase 3 executes saved artifacts through a real browser without a model. Discovery, compilation,
-artifact promotion, and real human control transfer remain later phases. The checked-in artifact
+Replay executes saved artifacts through a real browser without a model. The checked-in artifact
 is still an authored draft; running it does not silently approve or overwrite that revision.
 
 ## Run The Draft
@@ -54,12 +53,11 @@ Default mode is `replay`, which rejects drafts. A previously verified artifact m
 with `--artifact`, or by an exact registry name/version:
 
 ```bash
-pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"67890"}'
+pnpm replay get_member_savings_balance --version 2 --inputs '{"member_id":"67890"}'
 ```
 
-That latter command requires an existing verified revision in `artifacts/capabilities/` and a
-running target at `TARGET_URL`. Phase 3 does not create that revision automatically; the later
-verification/publication workflow will do so. `TARGET_URL` supplies the origin; the artifact
+That latter command requires an existing verified revision in `artifacts/capabilities/` (produced
+by `pnpm agent` or `pnpm compile --verify`) and a running target at `TARGET_URL`. `TARGET_URL` supplies the origin; the artifact
 supplies its entry path. Standalone execution never rewrites the configured policy origins.
 Explicit sandbox execution changes the policy origin only to the newly owned mock instance.
 
@@ -81,15 +79,16 @@ artifact + typed inputs
 ```
 
 `src/replay/engine.ts` owns this sequence. `src/surface/playwright-adapter.ts` owns perception,
-target resolution, browser/session control, and condition evaluation. The Harbor profile maps
-actual elements to trusted control identities; a model or artifact cannot supply its own
-`targetKey`. For example, naming a different submitter "Search" does not make it the permitted
-member-search control.
+target resolution, browser/session control, and condition evaluation. Before any dispatch the
+adapter measures what the actual node would do (`src/surface/effects.ts`: read, follow a link,
+type into a listed form, submit a listed form) and policy decides from that measurement; an
+artifact cannot supply its own risk or identity. Naming a different submitter "Search" does not
+make its form a permitted submission ([POLICY.md](POLICY.md)).
 
 Resolution supports exact roles, labels, text, table cells, CSS, frame chains, and containers.
 Fallbacks are ordered; ambiguity stops rather than selecting the first match. Table matching
-uses a unique row and column. Wrong-member account frames cannot be extracted through the
-profile. Observation refs bind to actual nodes and are invalidated by a new observation,
+uses a unique row and column. A wrong record is caught by the artifact's identity checkpoint,
+which every compiled artifact carries. Observation refs bind to actual nodes and are invalidated by a new observation,
 navigation, action, or relevant DOM change. Captured table targets use labels/columns rather
 than hardcoding the balance currently displayed.
 
@@ -146,7 +145,7 @@ navigation is restricted, and unsupported popups/downloads terminate the run.
 This is deliberately **HTTP-only, one-origin, trusted-local-app automation**, not a general
 browser/OS security sandbox. HTTPS tunneling, desktop control, arbitrary hostile scripts,
 downloads, and multi-tenant browsers are not claimed as supported. Script-free server-rendered
-forms are the implemented surface; CSS/query/template support stays within the Phase 2 contract.
+forms are the implemented surface; CSS/query/template support stays within the artifact contract.
 
 ## Recovery And Deadlines
 
@@ -182,12 +181,12 @@ write stops the run rather than silently executing without logs.
 
 Structured business outputs are returned to the caller on stdout, not stored in the evidence
 log. Do not redirect that output into public submission evidence without review. Reviewed
-examples are under [evidence/replay-phase3](../evidence/replay-phase3/README.md).
+examples are under [evidence/replay](../evidence/README.md).
 
 Without a handoff broker, unknown dialogs and exhausted recovery return failures and close the
 session; no intervention ID is invented. With `--hitl`, an unknown dialog opens a real
 intervention: the operator claims the same headed browser, their form submissions are authorized
-through the proxy by `policy.yaml › humanActions` (disabling the proxy is not a handoff), and
-automation resumes only after validation. Exhausted recovery remains terminal. See [HITL.md](HITL.md).
-Phase 4 builds LLM-driven discovery on these same bounded surface operations; see
+through the proxy by `policy.yaml › forms` and `humanForms` (disabling the proxy is not a
+handoff), and automation resumes only after validation. Exhausted recovery remains terminal. See
+[HITL.md](HITL.md). Discovery builds on these same bounded surface operations; see
 [DISCOVERY.md](DISCOVERY.md).

@@ -1,6 +1,6 @@
-# Phase 5: Compilation And Verification
+# Compilation And Verification
 
-Phase 5 turns a sanitized discovery transcript into a `CapabilityArtifact` and proves that the
+The compiler turns a sanitized discovery transcript into a `CapabilityArtifact` and proves that the
 artifact replays without the model before it can be used in production. The compiler is
 deliberately conservative: it emits only what the transcript demonstrates, and verification is
 the evidence that "the artifact replays deterministically" rather than an assertion.
@@ -12,14 +12,16 @@ the evidence that "the artifact replays deterministically" rather than an assert
 pnpm compile --run <discovery-runId> [--outcome-run <business-outcome-runId> ...]
 
 # Compile, then verify in fresh sandboxes and publish a verified revision on success
-pnpm compile --run <discovery-runId> --outcome-run <not-found-runId> \
-  --verify --sandbox --verify-inputs '{"memberId":"12345"}' --verify-inputs '{"memberId":"67890"}'
+pnpm compile --run <discovery-runId> --outcome-run <not-found-runId> --name get_member_savings_balance \
+  --verify --sandbox --verify-inputs '{"member_id":"12345"}' --verify-inputs '{"member_id":"67890"}'
 ```
 
 `--run` names a directory under `--evidence-root` (default `artifacts/runs`) containing
-`discovery.json`. `--outcome-run` may repeat; each must be a `BUSINESS_OUTCOME` transcript of the
-same goal family. `--name` (default `get_member_savings_balance`) and `--version` (default `1`)
-choose the draft revision; a revision that already exists is refused, never overwritten.
+`discovery.json`. `--outcome-run` may repeat; each must be a `BUSINESS_OUTCOME` transcript whose
+declared contract has the same shape (name, input names and formats, output names and parsers).
+`--name` and `--version` (default `1`) choose the draft revision; a revision that already exists
+is refused, never overwritten. Verification inputs are keyed by the names the transcript's
+contract declared (`member_id` in the live runs).
 `--verify` requires `--sandbox` and at least two distinct `--verify-inputs`; verification through
 the CLI runs only against sandboxes the CLI itself creates. No model key is read.
 
@@ -36,9 +38,12 @@ Result on stdout, exit 0 for `COMPILED` and `VERIFIED`:
 
 ## Compilation Rules
 
-`src/compiler/compile.ts` knows the *shape* of each supported goal family (typed inputs,
-outputs with parsers, which extract fields are identity checks, which business outcomes exist)
-and nothing about UI order or selectors. Everything else comes from the transcript.
+`src/compiler/compile.ts` has no registry of goals. The capability contract is the GoalSpec the
+model declared and the engine verified, as recorded in the transcript: input names become
+sensitive string fields (`digits` inputs at the width observed, text bounded), output names take
+their declared parser and type, and an `extract` of an input name is an identity check rather
+than a step. The compiler knows nothing about UI order or selectors; everything else comes from
+the transcript.
 
 | Transcript fact | Artifact result |
 |---|---|
@@ -51,7 +56,8 @@ and nothing about UI order or selectors. Everything else comes from the transcri
 | `wait` receipt | Nothing; replay owns its own waits and timeouts |
 | Terminal `complete` of an outcome transcript | `outcomes[]` entry with `provenance: { source: "observed", runId }` |
 
-Refusals rather than guesses: `COMPILE_NOT_SUCCESSFUL`, `COMPILE_NO_DISPATCHES`,
+Refusals rather than guesses: `COMPILE_NOT_SUCCESSFUL`, `COMPILE_HUMAN_ASSISTED` (a person acted
+in the browser mid-run, so the model's steps alone are not a recipe), `COMPILE_NO_DISPATCHES`,
 `COMPILE_AMBIGUOUS_ENTRY` (parameterized entry or navigate path), `COMPILE_AMBIGUOUS_EFFECT` (a
 click with no observed consequence to assert), `COMPILE_UNBOUND_FILL`, `COMPILE_NO_IDENTITY_CHECK`,
 `COMPILE_MISSING_OUTPUT`, `COMPILE_UNKNOWN_FIELD`, `COMPILE_INVALID_OUTCOME`,
@@ -66,7 +72,7 @@ The output is always `status: "draft"`, `risk: "read_only"`, with empty `failure
 `src/compiler/verify.ts` accepts only an unverified, read-only draft and at least two distinct
 input sets. It saves the draft first so a failed verification still leaves a reviewable
 revision, then for each input set creates a brand-new target and browser (via the injected
-factory; the CLI spins up a fresh mock instance) and runs the Phase 3 replay engine in
+factory; the CLI spins up a fresh mock instance) and runs the model-free replay engine in
 `verification` mode from the declared entry path. Any non-`SUCCESS` result stops verification
 and returns `REJECTED`. On success, a **new** revision (`version + 1`, `status: "verified"`,
 `verification.runId` = last run) is published; the draft is untouched.
@@ -78,10 +84,12 @@ with any non-read-only step is rejected outright.
 
 ## Limits
 
-- One goal family; adding another means adding its typed contract, not changing the compiler.
+- The contract is only as good as the declaration: a `digits` input is pinned to the width seen
+  during discovery, and an output's parser is the one the model chose. Verification with a second
+  input catches the common mistakes; a reviewer can still widen or tighten fields on the draft.
 - Postconditions assert what the model touched next, which is sufficient but not necessarily the
   most descriptive check; a reviewer may strengthen them. They are never weakened automatically.
 - No handler inference from failures or notices seen during discovery. Discovery stops on those,
   so there is no successful transcript to compile them from.
 - Verification proves replayability on the synthetic sandbox at one point in time, not stability
-  over many runs (a Phase 9 stretch).
+  over many runs.

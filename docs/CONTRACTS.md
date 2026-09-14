@@ -1,15 +1,16 @@
-# Phase 2 Contracts
+# Contracts
 
-These contracts were defined in Phase 2. Phase 3 now executes them through the adapter/replay
-engine described in [REPLAY.md](REPLAY.md). A validated schema still does not prove discovery
-or execution. The source of truth is the Zod schemas and their semantic checks.
+The capability artifact, result, and policy contracts. The replay engine executes them
+([REPLAY.md](REPLAY.md)); the compiler produces them ([COMPILE.md](COMPILE.md)). A validated
+schema still does not prove discovery or execution. The source of truth is the Zod schemas and
+their semantic checks. The policy contract is described in full in [POLICY.md](POLICY.md).
 
 ## Artifact
 
 The full [authored example](../examples/get-member-savings-balance.json) describes the actual
 Harbor UI: open search, fill member ID, submit search, click View member, and extract savings
-and currency from the iframe. It remains **draft** even though Phase 3 demonstrates sandbox
-execution; the CLI does not automatically publish a verified registry revision.
+and currency from the iframe. It remains **draft**: hand-written artifacts are never published
+as verified; only `pnpm compile --verify` and `pnpm agent` publish verified revisions.
 
 | Field | Contract |
 |---|---|
@@ -73,7 +74,7 @@ Targets have ordered `strategies` and optional `scope`:
 Conditions are `visible`, `text_equals`, or `path_equals`, optionally grouped in a single-level
 `all`/`any`. `path_equals` compares the pathname; network policy independently validates query
 strings. Missing frames make a detector false rather than hiding other eligible detectors;
-an action target with a missing frame must fail. Phase 3 implements these semantics with bounded
+an action target with a missing frame must fail. Replay implements these semantics with bounded
 polling, concrete node refs, and fail-closed ambiguity handling.
 
 The example checks the member identity in both the outer page and account iframe, locates the
@@ -111,7 +112,7 @@ refills the member ID rather than retrying a Search click against a blank form.
 A known-notice dismissal declares a scoped control and postcondition. Every recovery action
 passes through the same policy checks as ordinary actions. Per-handler and total attempt
 budgets are separate. Unknown notices do not gain permission just because their route matches.
-Phase 3 clears partial outputs and restarts at entry after every successful recovery, including
+Replay clears partial outputs and restarts at entry after every successful recovery, including
 dismissal, to avoid returning values read before a recovery changed the page.
 
 ## Replay Results
@@ -170,24 +171,25 @@ compiler/evidence review. Exceptions deliberately omit payloads, private paths, 
 `parsePolicy(value)` validates and freezes trusted app-owned configuration. Authorization only
 accepts objects produced by these functions, not shape-compatible model-provided policies.
 
-`authorizeRequest(policy, { url, method })` requires an exact listed HTTP origin, method, path,
-and allowed query values. The only path placeholder is `:memberId`, matching five digits.
-Only explicitly configured queries are allowed; duplicate keys, userinfo, fragments, encoded
+`authorizeRequest(policy, { url, method })` requires an exact listed HTTP origin and, for GET, a
+listed page (with allowed query values) or, for POST, a listed form path. The only path
+placeholder is `:id`, one opaque identifier segment. Duplicate keys, userinfo, fragments, encoded
 paths, traversal, and ambiguous URL spellings fail closed. Unsupported protocols also fail.
 
-`authorizeAction(policy, { appId, appVersion, url, action, targetKey? })` separately checks app
-identity and a specific action rule. Navigate/wait have no target key. Other keys must be
-derived by the **trusted adapter/app profile after resolving the actual control**, never copied
-from a model call. The URL is the navigation destination or the target's document/frame URL.
-Risk comes from the policy, not the artifact. Overlapping rules cannot return conflicting risks.
+`authorizeAction(policy, { appId, appVersion, url, action, effect? })` separately checks app
+identity and decides from the **structural effect the adapter measured on the actual node**
+(read, navigate to a destination, type into a form, submit a form with an exact field set); an
+effect is never copied from a model call or an artifact. The URL is the navigation destination
+or the target's document/frame URL. Risk comes from the policy's form rule, or is `read_only`
+for reads and page loads. Navigate/wait carry no effect.
 
-The shipped policy permits read-only member work and explicit session operations. It excludes
-sub-account creation and unknown-notice acknowledgment. Both notices POST to `/notice`, but
-only `system_notice_ok` has an action grant. Tests prove that permitting a route alone does not
-grant permission to every button on it.
+The shipped policy permits the sandbox's pages, its login, search, logout and notice forms, and
+reading any visible text on those pages. It excludes sub-account creation because that form is
+not listed, and an unfamiliar notice because its dialog is not a `knownDialog`. Tests prove that
+permitting a page alone does not grant permission to every form on it.
 
-The policy module remains a pure decision layer. Phase 3 connects it to actual target
-classification, guarded DOM dispatch, and a Chromium HTTP proxy that validates each redirect
+The policy module remains a pure decision layer. The adapter connects it to effect
+measurement, guarded DOM dispatch, and a Chromium HTTP proxy that validates each redirect
 hop and requires one-use POST grants. Policy failure immediately revokes forwarding and closes
 the context. The mock server's own 403 response is not proof of that enforcement; the browser
 tests additionally assert zero upstream requests for prohibited operations.

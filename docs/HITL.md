@@ -1,17 +1,25 @@
 # Human-In-The-Loop Handoff
 
-Phase 6 implements the seam the brief asks about: when replay meets something it must not handle
-on its own, it pauses, offers **the same live browser session** to an operator, records what the
-operator did in sanitized form, and resumes only after validating the operator's chosen resume
-action against the live page. Nothing here is a mock: the runs in
-[`evidence/hitl-phase6/`](../evidence/hitl-phase6/README.md) are real.
+When automation meets something it must not handle on its own, it pauses, offers **the same live
+browser session** to an operator, records what the operator did in sanitized form, and resumes
+only after validating the operator's chosen resume action against the live page. This works in
+both places the brief names: a replay that hits a condition it cannot recover from, and the
+discovery loop when the agent is stuck. The runs in [`evidence/hitl/`](../evidence/hitl/) and the
+attended replay in the browser test suite are real.
 
 ## Run It
 
 ```bash
+# From the goal-driven entrypoint (discovery or replay, whichever the router picks):
+HEADLESS=false pnpm agent --goal "What is the current savings balance for member 12345?" \
+  --sandbox --fault unexpected_confirm --hitl [--hitl-port 4100] [--hitl-wait-ms 300000]
+
+# From a direct replay:
 HEADLESS=false pnpm replay --artifact examples/get-member-savings-balance.json \
-  --inputs '{"memberId":"12345"}' --sandbox --mode verification \
-  --fault unexpected_confirm --hitl [--hitl-port 4100] [--hitl-wait-ms 300000]
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault unexpected_confirm --hitl
+
+# Reproducible discovery handoff with the live model and a scripted operator (see the file header):
+pnpm exec tsx scripts/hitl-discovery-demo.ts artifacts/runs
 ```
 
 `--hitl` requires a headed browser (`HEADLESS=false`), because a handoff nobody can see is just
@@ -44,8 +52,8 @@ waiting ──claim──▶ human_control ──resume──▶ validating ─�
 (any open state) ──abort──▶ aborted        (budget elapsed / browser lost) ──▶ expired
 ```
 
-Implemented in `src/hitl/interventions.ts` (`InterventionBroker`) and driven by
-`src/replay/engine.ts`:
+Implemented in `src/hitl/interventions.ts` (`InterventionBroker`) and driven by both
+`src/replay/engine.ts` and `src/discovery/engine.ts`:
 
 - **Ownership is explicit.** `controlOwner ∈ { automation, human, none }`. The engine's
   `health()` check, which runs before every browser operation, throws `CONTROL_NOT_OWNED` unless
@@ -61,53 +69,63 @@ Implemented in `src/hitl/interventions.ts` (`InterventionBroker`) and driven by
   `--hitl-wait-ms` the run ends `NEEDS_HUMAN { interventionId, reason }`. A watchdog also closes
   the intervention if the operator closes the window or trips a policy violation.
 
-## Trigger
+## Triggers
 
-An unknown dialog (`UNEXPECTED_DIALOG`) detected on a page whose surface is still healthy. That
-is the only trigger today. Native `window.confirm`-style dialogs still make the surface fatal and
-cannot be handed off; the mock's `unexpected_confirm` fault is an HTML interruption page. An
-exhausted safe recovery, a blocked risky step, and discovery's `request_human` remain terminal
-(`RECOVERY_EXHAUSTED`, `POLICY_BLOCKED`, `HUMAN_REQUIRED`) and are documented as future triggers.
+| Where | Trigger | Without `--hitl` |
+| --- | --- | --- |
+| replay | an unknown dialog (`UNEXPECTED_DIALOG`) on a page whose surface is still healthy | `FAILURE / UNEXPECTED_DIALOG` |
+| discovery | an unknown dialog before the model is asked, or between its decision and dispatch | `BLOCKED / UNEXPECTED_DIALOG` |
+| discovery | the model's own `request_human` decision (stuck, credentials or permission required) | `BLOCKED / HUMAN_REQUIRED` |
+
+Native `window.confirm`-style dialogs still make the surface fatal and cannot be handed off; the
+mock's `unexpected_confirm` fault is an HTML interruption page. A blocked risky step is a policy
+denial (`POLICY_BLOCKED`) and stays terminal: a person is never invited to do what the policy
+forbids automation from doing.
 
 ## Resume Semantics
 
 The engine validates the requested action **while the human still owns the browser**, against
 the live page, and a rejection leaves them in control rather than guessing:
 
-| Action | Accepted only if | Then |
-| --- | --- | --- |
-| `retry_step` | no unknown dialog remains; the paused step is `read_only` (`UNSAFE_RETRY` otherwise) | Partial outputs are cleared and the read-only flow restarts at its entry navigation, so identity checks and checkpoints re-run in the human's repaired session |
-| `skip_step` | no unknown dialog remains; the step has a declared postcondition (or wait condition) and it holds right now (`SKIP_NOT_PROVABLE`, `POSTCONDITION_NOT_MET`) | The step is marked `step_finished outcome=human` and automation continues with the next step |
-| `abort` | always | `FAILURE / ABORTED_BY_OPERATOR`; audit history is kept |
+| Action | Replay accepts only if | Discovery accepts only if | Then |
+| --- | --- | --- | --- |
+| `retry_step` | no unknown dialog remains; the paused step is `read_only` (`UNSAFE_RETRY` otherwise) | no unknown dialog remains; the browser is usable | Replay clears partial outputs and restarts the read-only flow at its entry navigation. Discovery forgets earlier reads and asks the model for its next action from a fresh observation |
+| `skip_step` | the step has a declared postcondition (or wait condition) and it holds now (`SKIP_NOT_PROVABLE`, `POSTCONDITION_NOT_MET`) | never (`SKIP_NOT_AVAILABLE`): there is no fixed step to skip | Replay marks the step `outcome=human` and continues |
+| `abort` | always | always | `ABORTED_BY_OPERATOR`; audit history is kept |
 
 `skip_step` is never accepted for an `extract` step: the page cannot prove a value was read, and
 a human cannot type an output in. A retry is never a re-dispatch of a possibly completed write;
-in this prototype every replayable step is read-only, so restart-at-entry is the safe form.
+every replayable step is read-only, so restart-at-entry is the safe form.
+
+A discovery run that a person helped along still answers the goal, and its transcript keeps a
+`HUMAN_RESUMED` mark. The compiler refuses such a transcript (`COMPILE_HUMAN_ASSISTED`): the
+model's steps alone did not reach the result, so they are not a replayable recipe.
 
 ## Human Handoff Is Not A Bypass
 
 The operator's browser still goes through the same policy proxy with the same one-use POST
-grants. `policy.yaml` gained a `humanActions` section:
+grants. An operator may submit the forms automation may submit plus any listed under
+`humanForms` in `policy.yaml` (see [POLICY.md](POLICY.md)):
 
 ```yaml
-humanActions:
-  - { action: click, path: /notice, targetKey: operator_notice_acknowledge, risk: reversible }
+humanForms:
+  - { path: /notice, fields: [], risk: reversible }
 ```
 
 While a human owns the browser, an init script (installed at the context, so it survives
 navigation) intercepts every form submission, tags the actual submitter with a one-time marker,
-and asks the trusted side. `PlaywrightAdapter.humanSubmit` classifies the node with the same
-trusted profile automation uses, calls `authorizeHumanAction`, and only then issues a grant for
-exactly that destination and form body before re-issuing the submission natively. An unlisted
-submission (for example `sign_in`) is prevented, recorded as `human_action submit … blocked`,
-and never reaches the network. GET navigation remains governed by `requests`. `humanActions`
-accepts `read_only`/`reversible` only; irreversible operations cannot be authorized by anyone.
+and asks the trusted side. `PlaywrightAdapter.humanSubmit` measures the submission's structural
+effect exactly as it does for automation, calls `authorizeHumanAction`, and only then issues a
+grant for that destination and form body before re-issuing the submission natively. An unlisted
+submission (the sandbox's "Open sub-account" form, for example) is prevented, recorded as
+`human_action submit … blocked`, and never reaches the network. GET navigation remains governed
+by `pages`. Irreversible operations cannot be authorized by anyone.
 
 ## Recording What The Human Did
 
 The recorder captures `click` and `submit` events across frames and navigations while, and only
-while, a human owns control. Each record is `{ action, targetKey?, outcome, path, at }` where
-`targetKey` is the trusted classification (or absent) and `path` is the canonical route. Typed
+while, a human owns control. Each record is `{ action, effect, outcome, path, at }` where
+`effect` is the measured structural effect and `path` is the canonical route. Typed
 values, URLs, element text, and the operator's note are never captured. The records live in the
 run's `events.jsonl` (`human_action`) and in `intervention_N.json`, which also carries every
 state transition with its rejection code. Both pass through the evidence sink's schema and

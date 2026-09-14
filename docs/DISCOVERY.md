@@ -1,174 +1,124 @@
-# Phase 4: Bounded LLM Discovery
+# Discovery: The Goal-Agnostic Agent Loop
 
-Phase 4 lets a tool-calling model choose the next UI action from fresh, redacted observations of
-the real browser. The engine, not the model, authorizes and dispatches every action through the
-same guarded surface and network boundary that Phase 3 replay uses. Compilation of a discovery
-transcript into a replayable artifact is Phase 5 ([COMPILE.md](COMPILE.md)); replay-time human
-handoff is Phase 6 ([HITL.md](HITL.md)). Discovery's own `request_human` still ends the run with
-`HUMAN_REQUIRED` rather than pausing: the discovery loop is not wired to the handoff broker.
+Discovery lets a tool-calling model learn a read-only flow from live observations of the real
+browser. The loop knows nothing about any particular goal: the model declares what it is looking
+for as a **GoalSpec**, and every later check is derived from that declaration. The engine, not
+the model, authorises and dispatches every action through the same surface, policy and network
+boundary that model-free replay uses ([POLICY.md](POLICY.md), [REPLAY.md](REPLAY.md)).
 
-## Status
-
-The loop, OpenAI client, sanitized transcript, and CLI are implemented. Offline tests drive them
-with explicitly test-only models against the real mock app in a real Chromium session; those
-runs are recorded with `source: "test"` and are not presented as discovery evidence.
-
-The Phase 4 gate is met: reviewed live `gpt-4.1` runs (a 9-turn success and a 3-turn not-found
-business outcome) are in [evidence/discovery-phase4](../evidence/discovery-phase4/README.md).
-The first live attempt exposed a contract bug — success claims required `ref: null` through a
-Zod refinement invisible in the JSON Schema the model receives, and the model naturally attached
-the evidence ref — which was fixed by ignoring the ref on success rather than by prompting.
-
-## Run Discovery
-
-Set the mock credentials, `OPENAI_API_KEY`, and optionally `DISCOVERY_MODEL` in `.env`, then:
+## Run it
 
 ```bash
-pnpm discover --goal "look up member 12345 and read their current savings balance" --sandbox
+pnpm discover --goal "What is the current savings balance for member 12345?" --sandbox
+pnpm discover --goal "How much does member 67890 have in their checking account?" --sandbox
 ```
 
-`--sandbox` starts a fresh mock instance on an ephemeral loopback port and a fresh browser, and
-closes both afterward; `pnpm mock-app` is not needed. Alternatively point at a running instance:
-
-```bash
-pnpm discover --goal "look up member 12345 and read their current savings balance" \
-  --target http://localhost:4000/
-```
-
-`--target` must be an `http://` loopback origin with no path, query, fragment, or credentials.
-`--fault <name>` is accepted only with `--sandbox`. Flags cannot be repeated.
+`--sandbox` starts a fresh mock instance and browser and closes both afterwards; `pnpm mock-app`
+is not needed. `--target http://localhost:4000/` points at a running instance instead. One JSON
+line is printed; exit 0 for `SUCCESS` and `BUSINESS_OUTCOME`.
 
 | Flag | Default | Bound |
 |---|---|---|
 | `--max-steps` | 25 | 1-50 model action turns |
-| `--max-duration-ms` | 180000 | 1-300000 for the whole run, including model calls |
+| `--max-duration-ms` | 180000 | 1-300000 for the whole run |
 | `--model-timeout-ms` | 30000 | 1-60000 per model call |
-| `--max-tokens` | 40000 | 1-200000 input plus output tokens across all calls |
-| `--policy` | `policy.yaml` | Trusted local path |
-| `--evidence-root` | `artifacts/runs` | Trusted local path |
+| `--max-tokens` | 40000 | 1-200000 input plus output tokens |
 
-The command prints one JSON result line on stdout and exits 0 for `SUCCESS` and
-`BUSINESS_OUTCOME`, otherwise 1. A success looks like:
+## The GoalSpec
+
+The first model call turns the goal text into a contract:
 
 ```json
-{ "kind": "SUCCESS", "runId": "run_...", "code": "COMPLETED", "source": "live", "turns": 8,
-  "usage": { "inputTokens": 12345, "outputTokens": 210 }, "usageComplete": true,
-  "evidence": ["events.jsonl", "discovery.json"],
-  "outputs": { "savingsBalanceCents": 123456, "currency": "USD" } }
+{ "status": "ready", "goal": {
+    "name": "get_member_checking_balance",
+    "description": "Retrieve the checking account balance for a specific member.",
+    "inputs":  [{ "name": "member_id", "value": "67890", "description": "..." }],
+    "outputs": [{ "name": "checking_account_balance", "parser": "usd_cents", "description": "...", "sensitive": true }] } }
 ```
 
-`usage` is the sum of provider-reported tokens. `usageComplete` is false when any call failed
-without a usable receipt, so a zero never masquerades as a confirmed free call. Business outputs
-appear only on stdout, never in evidence files.
+The engine accepts it only if every input value is written literally in the goal (no invented
+or completed identifiers), the capability name does not embed an input value, and the declared
+names are valid identifiers. `clarify` and `unsupported` end the run before any browser starts.
+From here on:
 
-### Result Kinds
+- the tool schemas are built from the spec: `fill` may name only a declared input, `extract`
+  only a declared input or output, `complete` claims `success` or a `business_outcome` with an
+  `UPPER_SNAKE` code and the ref of the visible message;
+- the transcript records the spec (names, parsers, descriptions, input format and width, never
+  the values) and the compiler derives the artifact's contract from it;
+- every input value is treated as sensitive and redacted from all evidence.
 
-| Kind | Codes | Meaning |
-|---|---|---|
-| `SUCCESS` | `COMPLETED` | All four reads verified for the declared member |
-| `BUSINESS_OUTCOME` | `MEMBER_NOT_FOUND`, `INVALID_MEMBER_ID` | Verified against the live alert after an actual search for the declared member |
-| `CLARIFICATION_REQUIRED` | same | Intent needs a member ID, or the goal's five-digit ID is absent, duplicated, or disagrees with intent |
-| `UNSUPPORTED_GOAL` | same | Intent is not the supported read-only balance family |
-| `BLOCKED` | `POLICY_BLOCKED`, `UNEXPECTED_DIALOG`, `SESSION_REQUIRED`, `HUMAN_REQUIRED`, `TOKEN_LIMIT`, `STEP_LIMIT`, `DEAD_END` | Stopped by policy, an unknown notice, session loss, a human request, or a budget |
-| `FAILURE` | `MODEL_ERROR`, `MODEL_TIMEOUT`, `RUN_TIMEOUT`, `SURFACE_TIMEOUT`, `INVALID_DECISION`, `EVIDENCE_ERROR`, `TRANSCRIPT_UNSAFE`, `TRANSCRIPT_WRITE_FAILED`, `UNSAFE_GOAL`, `CONTEXT_LIMIT`, `RESOURCE_CLOSE_FAILED`, `INVALID_OPTIONS`, surface codes | Engine, model, evidence, or browser failure |
-| `FAILURE` (CLI setup) | `CLI_INVALID`, `CONFIG_ERROR`, `MODEL_NOT_CONFIGURED` | Rejected before any browser or provider call; no evidence directory is created |
+## Acceptance is generic
 
-`SESSION_REQUIRED` is deliberately blocking: discovery does not re-login. Reauthentication is a
-replay recovery with a declared entry step, not something a model should improvise mid-discovery.
-`UNEXPECTED_DIALOG` is detected before the model is asked, so no decision is solicited through an
-unknown notice. `DEAD_END` fires after three identical decisions against an unchanged observation.
+`src/discovery/acceptance.ts` decides whether what the model read proves its claim, using only
+the spec:
 
-## Execution Path
+- reading an **input** back is an identity check: the text must equal the declared value
+  (`WRONG_IDENTITY` otherwise);
+- reading an **output** must parse with its declared parser (`EXTRACTION_FAILED` otherwise);
+- a **success** claim needs, for every output, a read of that output and a read of every input
+  in the *same document or frame*; all of those reads are re-resolved and re-read under one
+  unchanged document state, and the outputs returned are the re-read values
+  (`INCOMPLETE_EVIDENCE`, `STATE_CHANGED`);
+- a **business outcome** needs a live `alert`/`status` element in the main document, on a page
+  reached by a form submission that carried every declared input value.
+
+This is the generic form of "the balance you are showing me belongs to the member I asked
+about", and it is why swapping the accounts frame to another member, or submitting a different
+identifier, is refused without the code knowing what a member is.
+
+## Execution path
 
 ```text
 goal
   -> reject goals containing known secrets (no provider call)
-  -> intent call: ready / clarify / unsupported, declared memberId
-  -> the goal must contain exactly one five-digit ID equal to the declared memberId
-  -> create private evidence, browser, and enforced network boundary; authenticate
-  -> loop (bounded by steps, tokens, duration, and repetition):
-       unknown dialog?  -> BLOCKED
-       observe          -> redact -> model.decide -> strict tool parse
-       capture ref      -> trusted classify -> authorize -> dispatch -> record receipt
-       complete         -> re-resolve every read under one consistent document state
-  -> write events, structural snapshot on non-success, sanitized transcript
-  -> close owned resources; a failed or hung close fails the run
+  -> intent call -> GoalSpec (or clarify / unsupported)
+  -> private evidence, browser, enforced network boundary; sign in per policy.session
+  -> loop (bounded by steps, tokens, duration, repetition):
+       unknown dialog?   -> handoff with --hitl, otherwise BLOCKED
+       observe -> redact -> model.decide(spec) -> strict tool parse
+       capture ref -> measure effect -> authorize -> dispatch -> record receipt
+       complete -> re-verify every read under one document state
+  -> events, structural snapshot on non-success, sanitized transcript
 ```
 
-`src/discovery/engine.ts` owns this loop. `src/discovery/model.ts` owns the OpenAI client.
-`src/discovery/harbor-goal.ts` holds the acceptance criteria for the one supported goal family.
-`src/discovery/transcript.ts` writes the sanitized transcript. `src/discovery/privacy.ts`
-implements known-value redaction.
+The model receives the goal, the spec, the current observation (refs, tags, labels, text, frame
+path, hrefs, table row/column), the last five action results and which names were extracted
+where. It never receives selectors, effects, form values, credentials or source. Any string
+containing a known secret is replaced whole by `[REDACTED]`.
 
-## Model Tools And Context
+## Result kinds
 
-The model receives the goal, `inputs: { memberId }`, the current observation, the last five
-action results, and which fields have been extracted. Each observed control exposes a ref, tag,
-label, text, frame path, enabled state, input type, same-origin href, select options, `main` or
-`frame` scope, and table row/column labels where relevant. It does **not** receive selectors,
-resolution strategies, trusted control identities, form values, credentials, source code,
-fixtures, or the example artifact. Any string containing a known secret is replaced whole by
-`[REDACTED]`. Contexts over 60,000 characters stop the run with `CONTEXT_LIMIT`.
-
-| Tool | Input | Engine enforcement |
+| Kind | Codes | Meaning |
 |---|---|---|
-| `fill` | `ref`, `input: "memberId"` | Only the declared input; the ref must classify as the member ID field or `FIELD_MISMATCH` |
-| `click` | `ref` | Ref must classify to a permitted control or `POLICY_BLOCKED`; Search requires the form's live `memberId` value to equal the declared member or `WRONG_MEMBER` |
-| `extract` | `ref`, `field` | Ref must classify as that field for the declared member's route; identity reads must equal the declared ID |
-| `navigate` | `path` | Only the current path or an href present in a fresh observation, else `UNOBSERVED_NAVIGATION` |
-| `wait` | `ms` 50-1000 | Bounded pause |
-| `complete` | `outcome`, `ref` | Success is judged only on recorded extracts (`memberId` in main and frame plus balance and currency in frame, all re-read under one document state); any ref on a success claim is ignored. Business outcomes need the ref of a live `alert` on the search page after an actual submission |
-| `request_human` | `code` | Returns `HUMAN_REQUIRED`; no intervention or session handoff is faked |
+| `SUCCESS` | `COMPLETED` | Every declared output re-verified for the declared identity; `outputs` and `goal` are returned |
+| `BUSINESS_OUTCOME` | model-chosen code, e.g. `NO_MEMBER_FOUND` | Verified on a live message after submitting the inputs |
+| `CLARIFICATION_REQUIRED` | same | Intent asked to clarify, or declared an input the goal does not contain |
+| `UNSUPPORTED_GOAL` | same | Not a read of this application |
+| `BLOCKED` | `POLICY_BLOCKED`, `UNEXPECTED_DIALOG`, `SESSION_REQUIRED`, `HUMAN_REQUIRED`, `NEEDS_HUMAN`, `ABORTED_BY_OPERATOR`, `TOKEN_LIMIT`, `STEP_LIMIT`, `DEAD_END` | Stopped by policy, an unknown notice, session loss, a human, or a budget |
+| `FAILURE` | `MODEL_ERROR`, `MODEL_TIMEOUT`, `RUN_TIMEOUT`, `EVIDENCE_ERROR`, `TRANSCRIPT_UNSAFE`, … | Engine, model, evidence or browser failure |
 
-Every action first captures the live element, classifies it with the trusted Harbor profile, and
-checks the ref is still the same node. Model-supplied `targetKey`, literal fill values, extra
-input fields, and unknown tools are schema rejections. A rejected or failed dispatch is recorded
-with its code but never with a target, so the transcript cannot suggest it happened. Any
-successful fill, click, or navigate clears prior extracted evidence.
+## Human handoff during discovery
 
-## Model Client
-
-`readDiscoveryModel()` requires `OPENAI_API_KEY` and accepts `DISCOVERY_MODEL` from the
-`gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano` family (including `-2025-04-14` snapshots). Calls use
-the OpenAI Responses API through the Vercel AI SDK with `toolChoice` required, a single step,
-temperature 0, 512 output tokens, no SDK retries, `store: false`, parallel tool calls disabled,
-telemetry off, and no request/response bodies attached to results.
-
-A per-call fetch wrapper reads the wire `status`, `usage`, `model`, and `id` before the SDK
-normalizes them, so a failed or incomplete response still yields a usage receipt where one exists.
-Provider errors are never rethrown with their original message or cause; only a sanitized
-`ModelCallError` with the receipt escapes. Model and response IDs are checked against known
-secrets and a conservative character set before they are recorded.
+With a broker attached (`pnpm agent --hitl`, or `scripts/hitl-discovery-demo.ts`), an unknown
+dialog or a `request_human` decision pauses the loop instead of ending it: the operator claims
+the very same browser, acts, and resumes with `retry_step`; the model then re-plans from a fresh
+observation. `skip_step` is refused (there is no fixed step to skip). The transcript keeps a
+`HUMAN_RESUMED` mark and the compiler refuses to compile such a run: the goal was answered, but a
+recipe that needed a person is not a replayable recipe. See [HITL.md](HITL.md).
 
 ## Evidence
 
-Runs write to ignored `artifacts/runs/<runId>/` with private permissions:
-
-- `events.jsonl`: discovery lifecycle events (`discovery_started`, `model_call`,
-  `surface_starting`, `decision_selected`, `decision_finished`, `discovery_finished`) plus the
-  surface, policy, and network events shared with replay. No goal text, UI text, or outputs.
-- `snapshot_N.json`: structural DOM snapshot on any non-success outcome, as in replay.
-- `discovery.json`: the sanitized transcript. `calls` lists each model call's turn, phase,
-  configured and returned model ID, response ID, usage, and status. `records` lists each
-  decision's tool, reason, status, code, and, for confirmed dispatches only, the captured
-  target, trusted `targetKey`, and paths.
-
-Before writing, member routes are canonicalized to `/members/:memberId`, literal member values
-in targets become `{ "source": "input", "name": "memberId" }`, and every string is checked
-against credentials, the provider key, the goal's member ID, and values read from the UI. A
-transcript that fails these checks is not written and the run reports `TRANSCRIPT_UNSAFE`.
-
-The transcript is the input to `pnpm compile` (see [COMPILE.md](COMPILE.md)), not a capability
-artifact. It does not grant replay eligibility and is not registered. Business-outcome `complete`
-records carry the claimed `outcome` so the compiler can emit an `observed` handler without
-inferring it from UI text.
+`artifacts/runs/<runId>/` holds `events.jsonl`, `snapshot_N.json` on non-success, and
+`discovery.json`: model call receipts and, for confirmed dispatches only, the captured target,
+the measured effect kind and canonical paths. Literal input values in targets become
+`{ "source": "input", "name": ... }`, identifiers in paths become `:id`, and every string is
+checked against credentials, the provider key, the inputs and the values read from the UI.
 
 ## Limits
 
-- One goal family (`member_savings_balance`), one input (`memberId`), one origin, HTTP only.
-- Observations are capped at 10 frames and 200 controls; `truncated` tells the model so.
-- Three consecutive retryable errors, or three repeated decisions, stop the run.
-- The Harbor profile still supplies control identities and acceptance criteria. Supporting
-  another app means writing its reviewed profile and goal checks, not only a new prompt.
-- No vision, desktop control, or physical input events. No writes; the policy denies them and
-  the acceptance checks cannot be satisfied by anything except reads.
+- Reads only: the policy denies writes and acceptance cannot be satisfied by anything but reads.
+- Every input must be visible in the document that shows the outputs. A read whose selecting
+  input is never displayed (a date-range filter, say) would need an acceptance extension.
+- One origin, HTTP loopback, 10 frames and 200 controls per observation, three retries or three
+  repeated decisions stop the run. No vision or physical input events.

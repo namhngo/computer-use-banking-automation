@@ -1,3 +1,10 @@
+> **Historical document.** This is the design proposal written before implementation. The
+> delivered system differs in one important way: it has no per-goal or per-control code. The
+> model declares a GoalSpec, acceptance and compilation derive from it, and policy decides risk
+> from measured structural effects ([POLICY.md](POLICY.md), [DISCOVERY.md](DISCOVERY.md)).
+> Phase numbers below refer to the development schedule, not to the code layout. `REPORT.md`
+> is the authoritative description of what was built.
+
 # Proposal: Computer-Use Automation System (interface.ai take-home)
 
 > Working document. Sections marked **[REVISED]** changed from the original draft after review
@@ -8,7 +15,7 @@
 strict typechecking, 579 unit/contract/HTTP/CLI tests, and 132 Chromium tests. Model-free replay,
 guarded UI actions, network enforcement, and private evidence now work against the authored
 draft. See [REPLAY.md](REPLAY.md), [CONTRACTS.md](CONTRACTS.md), and the reviewed
-[replay evidence](../evidence/replay-phase3/README.md). LLM discovery, compilation/promotion,
+[replay evidence](../evidence/README.md). LLM discovery, compilation/promotion,
 and human handoff were then delivered in Phases 4-6 (see the phase table in §10.2 and the
 status paragraph in the README); these replay runs are not discovery evidence.
 
