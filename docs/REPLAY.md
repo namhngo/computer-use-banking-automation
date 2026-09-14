@@ -40,14 +40,15 @@ pnpm replay --artifact examples/get-member-savings-balance.json \
 The results are respectively `BUSINESS_OUTCOME / MEMBER_NOT_FOUND`, success after one recorded
 reauthentication, and `FAILURE / PERMISSION_DENIED`. Failure exits with status 1; success and
 business outcomes exit with status 0. Other mock fault names from the README also work.
-`unexpected_confirm` stops with `UNEXPECTED_DIALOG`; with `--hitl` (headed only) it instead
+`unexpected_confirm` stops with `UNEXPECTED_DIALOG` when unattended; in an attended run it instead
 pauses for a real operator in the same browser session, see [HITL.md](HITL.md).
 
 ## CLI Boundary
 
 `--inputs` is JSON, preserving types and leading-zero string IDs. Malformed JSON and unknown or
 duplicate flags fail closed. `--fault` is restricted to owned sandboxes. `.env` supplies mock
-credentials and `HEADLESS`; the CLI does not print credentials. `HEADLESS=false` shows Chromium.
+credentials and `HEADLESS`; the CLI does not print credentials. Runs are attended (visible
+Chromium, operator console) unless `--unattended` or `HEADLESS=true`.
 
 Default mode is `replay`, which rejects drafts. A previously verified artifact may be loaded
 with `--artifact`, or by an exact registry name/version:
@@ -184,7 +185,7 @@ log. Do not redirect that output into public submission evidence without review.
 examples are under [evidence/replay](../evidence/README.md).
 
 Without a handoff broker, unknown dialogs and exhausted recovery return failures and close the
-session; no intervention ID is invented. With `--hitl`, an unknown dialog opens a real
+session; no intervention ID is invented. In an attended run, an unknown dialog opens a real
 intervention: the operator claims the same headed browser, their form submissions are authorized
 through the proxy by `policy.yaml › forms` and `humanForms` (disabling the proxy is not a
 handoff), and automation resumes only after validation. Exhausted recovery remains terminal. See

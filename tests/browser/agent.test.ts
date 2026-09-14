@@ -13,6 +13,7 @@ import { parseArtifact } from '../../src/artifact/schema.js';
 import type { VerificationTarget } from '../../src/compiler/verify.js';
 import type { DiscoveryDecision, GoalSpec } from '../../src/discovery/contracts.js';
 import type { DiscoveryModel } from '../../src/discovery/model.js';
+import { InterventionBroker } from '../../src/hitl/interventions.js';
 import { loadPolicy, parsePolicy } from '../../src/policy/policy.js';
 
 const credentials = { username: 'agent-synthetic-operator', password: 'agent-synthetic-password' };
@@ -206,6 +207,32 @@ it('cold run without owned sandboxes or a second input saves an unverified draft
   expect((await readdir(join(root, 'capabilities'))).sort()).toEqual([
     'harbor_core--1.0--get_member_savings_balance--1.json', 'harbor_core--1.0--get_member_savings_balance--2.json']);
 }, 90_000);
+
+it('a discovery a person helped along answers the goal but is deliberately not compiled', async () => {
+  const registry = new FileCapabilityRegistry(join(root, 'capabilities'));
+  const calls = { intent: 0, decide: 0 };
+  const scripted = scriptedDiscovery('12345', calls);
+  let asked = false;
+  const model: DiscoveryModel = { ...scripted, decide: (spec, input, signal) => {
+    if (asked) return scripted.decide(spec, input, signal);
+    asked = true;
+    return Promise.resolve({ value: { tool: 'request_human', input: { reason: 'ask_human', code: 'stuck' } },
+      usage: { inputTokens: 10, outputTokens: 2 }, modelId: 'actual-test-model' });
+  } };
+  const broker = new InterventionBroker(InterventionBroker.generateToken(), { onOpen: (view) => {
+    void (async () => {
+      expect(await broker.claim(view.id, 'alice')).toMatchObject({ ok: true });
+      expect(await broker.resume(view.id, 'alice', 'retry_step')).toMatchObject({ ok: true, state: 'resumed' });
+    })();
+  } });
+  const result = await agent(await listen('none'), { discoveryModel: model, registry, hitl: { broker, maxWaitMs: 10_000 } });
+  expect(result).toMatchObject({ kind: 'DISCOVERED', discovery: { kind: 'SUCCESS', outputs: { savingsBalanceCents: 123456 } },
+    compiled: { draft: null, verified: null, code: 'COMPILE_HUMAN_ASSISTED', verificationRuns: [] } });
+  expect(spawnedSandboxes).toBe(0);
+  await expect(readdir(join(root, 'capabilities'))).rejects.toThrow();
+  const transcript = JSON.parse(await readFile(join(root, 'runs', (result as { discovery: { runId: string } }).discovery.runId, 'discovery.json'), 'utf8')) as { records: Array<{ code?: string }> };
+  expect(transcript.records[0]).toMatchObject({ code: 'HUMAN_RESUMED' });
+}, 60_000);
 
 it('cold run ending in a business outcome completes the goal and compiles nothing', async () => {
   const registry = new FileCapabilityRegistry(join(root, 'capabilities'));

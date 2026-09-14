@@ -9,6 +9,7 @@ import { readConfig } from '../config.js';
 import { discoveryResultSchema, type DiscoveryResult } from '../discovery/contracts.js';
 import { runDiscovery } from '../discovery/engine.js';
 import { readDiscoveryModel } from '../discovery/model.js';
+import { attend, attendanceOptions, resolveAttendance } from '../hitl/cli.js';
 import { loadPolicy, parsePolicy } from '../policy/policy.js';
 
 let result: DiscoveryResult;
@@ -30,6 +31,7 @@ try {
       'max-duration-ms': { type: 'string', default: '180000' },
       'model-timeout-ms': { type: 'string', default: '30000' },
       'max-tokens': { type: 'string', default: '40000' },
+      ...attendanceOptions,
     },
   });
   const supplied = new Set<string>();
@@ -44,6 +46,7 @@ try {
     || !values.policy.trim() || values.policy.length > 4096
     || !values['evidence-root'].trim() || values['evidence-root'].length > 4096) throw new Error();
   const fault = mockFaultSchema.parse(values.fault);
+  const attendance = resolveAttendance(values, supplied);
   function bounded(value: string, max: number): number {
     if (!/^[0-9]+$/.test(value)) throw new Error();
     const number = Number(value);
@@ -72,7 +75,9 @@ try {
   setupCode = 'CONFIG_ERROR';
 
   let server: ReturnType<typeof serve> | undefined;
+  let console: Awaited<ReturnType<typeof attend>>;
   try {
+    console = await attend(attendance);
     if (values.sandbox) {
       const { app } = createMockApp({ credentials, fault });
       server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
@@ -85,9 +90,10 @@ try {
     discoveryStarted = true;
     result = await runDiscovery({
       goal: values.goal, model, origin, policy, credentials, limits,
-      evidenceRoot: values['evidence-root'], headless: config.headless,
+      evidenceRoot: values['evidence-root'], headless: attendance.headless, ...(console === undefined ? {} : { hitl: console.hitl }),
     });
   } finally {
+    await console?.close();
     if (server?.listening) {
       const ownedServer = server;
       const closing = new Promise<void>((resolve, reject) => {

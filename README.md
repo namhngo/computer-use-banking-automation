@@ -58,9 +58,11 @@ pnpm replay get_member_savings_balance --version 2 --inputs '{"member_id":"12345
 pnpm agent --goal "Transfer 50 dollars from member 12345 savings to checking" --sandbox   # UNSUPPORTED_GOAL
 pnpm agent --goal "What is the savings balance?" --sandbox                               # CLARIFICATION_REQUIRED
 
-# 5. Human handoff in the same browser (headed). The sandbox raises an unfamiliar notice after
-#    sign-in; the run pauses, prints claim/resume curl commands, and continues after you act.
-HEADLESS=false pnpm agent --goal "What is the current savings balance for member 12345?" --sandbox --fault unexpected_confirm --hitl
+# 5. Human handoff is part of every run, not a mode. The sandbox raises an unfamiliar notice after
+#    sign-in; the run pauses with the Chromium window open, prints claim/resume curl commands on
+#    stderr, and continues after you acknowledge the notice and resume. (--unattended, or
+#    HEADLESS=true, turns this off: the same condition then ends the run with evidence.)
+pnpm agent --goal "What is the current savings balance for member 12345?" --sandbox --fault unexpected_confirm
 
 # Without a model key: replay the hand-written draft, including an authored session recovery.
 pnpm replay --artifact examples/get-member-savings-balance.json --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault session_expired
@@ -90,16 +92,19 @@ Deeper docs: [policy](docs/POLICY.md), [discovery](docs/DISCOVERY.md), [compile]
 
 | Command | Purpose |
 |---|---|
-| `pnpm agent --goal "..."` | Goal-driven entrypoint: execute a verified capability, or discover, compile and verify a new one; `--hitl` for handoff |
+| `pnpm agent --goal "..."` | Goal-driven entrypoint: execute a verified capability, or discover, compile and verify a new one |
 | `pnpm discover --goal "..."` | Discovery alone; prints the run ID for `pnpm compile` |
 | `pnpm compile --run <runId> [--outcome-run <runId>] [--verify --sandbox --verify-inputs ...]` | Compile a transcript into a draft; optionally verify and publish |
-| `pnpm replay <name> --version N --inputs '{...}'` / `--artifact <file>` | Model-free replay; `--fault` (sandbox only), `--hitl` |
+| `pnpm replay <name> --version N --inputs '{...}'` / `--artifact <file>` | Model-free replay; `--fault` (sandbox only) |
 | `pnpm mock-app [--port 4000] [--fault <name>]` | Run the sandbox standalone |
 | `pnpm check` | `lint`, `typecheck`, `test` (unit/HTTP/CLI) and `test:browser` |
 
 Common flags: `--sandbox`, `--target <http loopback URL>`, `--policy policy.yaml`,
 `--registry artifacts/capabilities`, `--evidence-root artifacts/runs`. Discovery budgets:
-`--max-steps`, `--max-duration-ms`, `--model-timeout-ms`, `--max-tokens`.
+`--max-steps`, `--max-duration-ms`, `--model-timeout-ms`, `--max-tokens`. Attendance:
+`agent`, `discover` and `replay` are attended by default (visible browser, operator console on
+`--hitl-port`, pause up to `--hitl-wait-ms`); `--unattended` or `HEADLESS=true` runs headless
+with no console.
 
 ## The sandbox
 
@@ -118,7 +123,7 @@ member detail, with the accounts table inside an iframe, no test IDs, a delibera
 | `member_not_found` / `validation_error` | Search shows a business message instead of a result |
 | `session_expired` / `slow_load` | First search revokes the session / takes 3 s (once per instance) |
 | `interstitial` | A known "System notice" dialog automation may acknowledge (`policy.yaml › knownDialogs`) |
-| `unexpected_confirm` | An unfamiliar dialog: automation stops, or hands off with `--hitl` |
+| `unexpected_confirm` | An unfamiliar dialog: automation hands the browser to a person (or stops with evidence when unattended) |
 | `permission_denied` / `app_error` | Member detail returns 403 / the accounts iframe returns 500 |
 
 Sessions expire after 15 minutes; the server binds to IPv4 loopback only. Tests use
@@ -128,8 +133,8 @@ Sessions expire after 15 minutes; the server binds to IPv4 loopback only. Tests 
 
 `.env` (never committed): `MOCK_USERNAME`, `MOCK_PASSWORD` (required to run the sandbox),
 `OPENAI_API_KEY` (discover/agent only), `DISCOVERY_MODEL` (`gpt-4.1`, `-mini`, `-nano`),
-`TARGET_URL` (default `http://localhost:4000/`), `HEADLESS` (default `true`). `pnpm config:check`
-validates without printing values.
+`TARGET_URL` (default `http://localhost:4000/`), `HEADLESS` (unset or `false` = attended runs
+with a visible browser; `true` = unattended). `pnpm config:check` validates without printing values.
 
 Synthetic data only. The model receives redacted UI observations, the goal and its own declared
 contract; never credentials, selectors, form values, source or fixtures. Input values, outputs,

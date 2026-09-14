@@ -12,7 +12,7 @@ import { parseReplayResult } from '../artifact/result.js';
 import type { ReplayResult } from '../artifact/result.js';
 import { capabilityKeySchema } from '../artifact/schema.js';
 import { readConfig } from '../config.js';
-import { openOperatorConsole, parseHitlFlags } from '../hitl/cli.js';
+import { attend, attendanceOptions, resolveAttendance } from '../hitl/cli.js';
 import { loadPolicy, parsePolicy, policyApp } from '../policy/policy.js';
 import { runReplay } from '../replay/engine.js';
 
@@ -33,9 +33,7 @@ try {
       'evidence-root': { type: 'string', default: 'artifacts/runs' },
       registry: { type: 'string', default: 'artifacts/capabilities' },
       version: { type: 'string' },
-      hitl: { type: 'boolean', default: false },
-      'hitl-port': { type: 'string', default: '4100' },
-      'hitl-wait-ms': { type: 'string', default: '300000' },
+      ...attendanceOptions,
     },
   });
   const supplied = new Set<string>();
@@ -49,7 +47,7 @@ try {
   if ((mode !== 'replay' && mode !== 'verification') || values.inputs === undefined
     || (!values.sandbox && (mode === 'verification' || fault !== 'none'))
     || !values.policy || !values['evidence-root'] || !values.registry) throw new Error();
-  const hitlFlags = parseHitlFlags(values, supplied);
+  const attendance = resolveAttendance(values, supplied);
 
   if (values.artifact !== undefined) {
     if (!values.artifact || positionals.length !== 0 || values.version !== undefined) throw new Error();
@@ -86,14 +84,12 @@ try {
   setupCode = 'CONFIG_ERROR';
   const config = readConfig();
   const credentials = readMockCredentials();
-  // A handoff needs a browser the operator can see; refusing headless here avoids a pause nobody can act on.
-  if (values.hitl && config.headless) throw new Error();
   let origin = new URL(config.targetUrl).origin;
   let policy = basePolicy;
   let server: ReturnType<typeof serve> | undefined;
-  let console: Awaited<ReturnType<typeof openOperatorConsole>> | undefined;
+  let console: Awaited<ReturnType<typeof attend>>;
   try {
-    if (hitlFlags) console = await openOperatorConsole(hitlFlags);
+    console = await attend(attendance);
     if (values.sandbox) {
       const { app } = createMockApp({ credentials, fault });
       server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
@@ -105,7 +101,7 @@ try {
     }
     result = await runReplay({
       artifact, inputs, mode, origin, policy, credentials,
-      evidenceRoot: values['evidence-root'], headless: config.headless, ...(console === undefined ? {} : { hitl: console.hitl }),
+      evidenceRoot: values['evidence-root'], headless: attendance.headless, ...(console === undefined ? {} : { hitl: console.hitl }),
     });
   } finally {
     await console?.close();

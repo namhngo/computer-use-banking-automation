@@ -191,6 +191,10 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       verificationRuns: report.attempts.map((attempt) => attempt.runId),
     } });
   } catch (error) {
+    // A person helped this run along: the goal is answered, and there is deliberately no recipe to keep.
+    if (error instanceof CompileError && error.code === 'COMPILE_HUMAN_ASSISTED') {
+      return finish({ kind: 'DISCOVERED', discovery, compiled: { draft: null, verified: null, code: error.code, verificationRuns: [] } });
+    }
     return finish({ kind: 'FAILURE', code: error instanceof CompileError ? error.code : 'PROMOTION_FAILED', discovery });
   }
 }

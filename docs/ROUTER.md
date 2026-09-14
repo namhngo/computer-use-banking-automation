@@ -80,14 +80,15 @@ pnpm agent --goal "..." [--sandbox [--fault <fault>] [--verify-inputs 67890]...]
                         [--target http://localhost:4000/] [--policy policy.yaml]
                         [--registry artifacts/capabilities] [--evidence-root artifacts/runs]
                         [--max-steps N] [--max-duration-ms N] [--model-timeout-ms N] [--max-tokens N]
-                        [--hitl [--hitl-port 4100] [--hitl-wait-ms 300000]]
+                        [--unattended | --hitl-port 4100 --hitl-wait-ms 300000]
 ```
 
 `--verify-inputs` takes bare values matched to the discovered contract's inputs in order
 (`67890`), a `name=value` list, or a JSON object. `OPENAI_API_KEY` is required for the router
 itself (`MODEL_NOT_CONFIGURED` otherwise); the replay it delegates to is still model-free.
-`--fault` and `--verify-inputs` only apply with `--sandbox`. `--hitl` needs `HEADLESS=false` and
-offers the same-browser handoff to both discovery and replay ([HITL.md](HITL.md)). Setup
+`--fault` and `--verify-inputs` only apply with `--sandbox`. Runs are attended by default
+(visible browser, operator console; same-browser handoff for both discovery and replay,
+[HITL.md](HITL.md)); `--unattended` or `HEADLESS=true` disables that. Setup
 failures print a `FAILURE` result with a code and never echo the goal, paths, or configuration
 values.
 

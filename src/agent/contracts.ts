@@ -68,12 +68,13 @@ const routingSchema = z.strictObject({
   usage: usageSchema,
   catalog: z.array(z.strictObject({ name: identifier, version: z.number().int().positive() })).max(50),
 });
+/** `draft: null` with a code means the run answered the goal but deliberately produced no artifact. */
 const compiledSchema = z.strictObject({
-  draft: capabilityKeySchema,
+  draft: capabilityKeySchema.nullable(),
   verified: capabilityKeySchema.nullable(),
   code: z.string().max(64).regex(/^[A-Z][A-Z0-9_]*$/).optional(),
   verificationRuns: z.array(z.string().regex(/^run_[a-f0-9]{32}$/)).max(10),
-});
+}).refine((compiled) => compiled.draft !== null || (compiled.verified === null && compiled.code !== undefined && compiled.verificationRuns.length === 0));
 const base = { agentRunId: z.string().regex(/^agent_[a-f0-9]{32}$/), source: z.enum(['live', 'test']), routing: routingSchema };
 
 export const agentResultSchema = z.discriminatedUnion('kind', [

@@ -14,7 +14,7 @@ name of the target app; it asks the policy.
 | May a link be followed? | `pages` | A same-origin, same-window, non-download link is a page load of its destination |
 | May a field be typed into? | `forms` | Only inside a form that a rule lists |
 | How is a session opened? | `session` | Login path, field labels, submit label, optional visible banner |
-| Which dialogs are benign? | `knownDialogs` | Any other dialog stops automation and, with `--hitl`, hands the browser to a person |
+| Which dialogs are benign? | `knownDialogs` | Any other dialog hands the browser to a person (or stops automation when the run is unattended) |
 | What may an operator submit during a handoff? | `forms` + `humanForms` | Handoff widens who acts, never what the app permits |
 
 Everything else is denied: script-only buttons, forms the page grows later (the sandbox's

@@ -75,7 +75,7 @@ goal
   -> intent call -> GoalSpec (or clarify / unsupported)
   -> private evidence, browser, enforced network boundary; sign in per policy.session
   -> loop (bounded by steps, tokens, duration, repetition):
-       unknown dialog?   -> handoff with --hitl, otherwise BLOCKED
+       unknown dialog?   -> handoff (attended runs), otherwise BLOCKED
        observe -> redact -> model.decide(spec) -> strict tool parse
        capture ref -> measure effect -> authorize -> dispatch -> record receipt
        complete -> re-verify every read under one document state
@@ -100,8 +100,8 @@ containing a known secret is replaced whole by `[REDACTED]`.
 
 ## Human handoff during discovery
 
-With a broker attached (`pnpm agent --hitl`, or `scripts/hitl-discovery-demo.ts`), an unknown
-dialog or a `request_human` decision pauses the loop instead of ending it: the operator claims
+In an attended run (the default for `pnpm agent` and `pnpm discover`), an unknown dialog or a
+`request_human` decision pauses the loop instead of ending it: the operator claims
 the very same browser, acts, and resumes with `retry_step`; the model then re-plans from a fresh
 observation. `skip_step` is refused (there is no fixed step to skip). The transcript keeps a
 `HUMAN_RESUMED` mark and the compiler refuses to compile such a run: the goal was answered, but a

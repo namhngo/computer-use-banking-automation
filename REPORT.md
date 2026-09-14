@@ -215,7 +215,9 @@ controlOwner ∈ { automation, human:<operatorId>, none }
 - **Same live session.** Headed browser; the operator uses the very same window, cookies, and
   page. A loopback API (`GET /interventions`, `POST …/claim`, `POST …/resume`) with a per-run
   bearer token (printed once, never stored) refuses competing claims and non-owner resumes.
-  `pnpm agent --hitl` and `pnpm replay --hitl` share one console (`src/hitl/cli.ts`).
+  Handoff is on by default for `pnpm agent`, `pnpm discover` and `pnpm replay`; `--unattended`
+  (or `HEADLESS=true`) turns it off, and then the same conditions end the run with evidence.
+  All three share one console (`src/hitl/cli.ts`).
 - **Recording what the human did.** A context-level init script captures clicks and
   submissions only while a human owns the browser and hands the node to the trusted side, which
   measures its effect exactly as for automation. Typed values are never recorded.
@@ -232,10 +234,12 @@ controlOwner ∈ { automation, human:<operatorId>, none }
   `pnpm compile` refuses it with `COMPILE_HUMAN_ASSISTED`; the model's steps alone did not reach
   the result.
 
-Evidence: `evidence/hitl/discovery-handoff` is a live-model discovery that paused at turn 1 on an
-unfamiliar notice, was claimed over the HTTP console, acknowledged in the same browser (recorded
-as `human_action` events), resumed, and finished `SUCCESS`. The operator's click was scripted on
-the handed-over page so the run is reproducible; the mechanism is identical to a person's click.
+Evidence: `evidence/hitl/discovery-handoff` is a live-model `pnpm agent` run that paused at turn 1
+on an unfamiliar notice, was claimed over the HTTP console, acknowledged **by a person clicking
+in the handed-over window** (recorded as `human_action click` and `submit … allowed` on
+`/notice`), resumed with `retry_step`, and finished `SUCCESS` in 7 turns. The agent reports it as
+`DISCOVERED` with the answer and `compiled: { draft: null, code: COMPILE_HUMAN_ASSISTED }`.
+`scripts/hitl-discovery-demo.ts` reproduces the same run with a scripted operator.
 
 ## Safety
 

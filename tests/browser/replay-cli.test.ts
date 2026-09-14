@@ -103,21 +103,28 @@ it.each([
   ['--version', '1'],
   ['get_member_savings_balance'],
   ['--sandbox', '--sandbox'],
-  ['--hitl-port', '4100'],
-  ['--hitl-wait-ms', '60000'],
-  ['--sandbox', '--hitl', '--hitl-port', '70000'],
-  ['--sandbox', '--hitl', '--hitl-wait-ms', '500'],
-  ['--sandbox', '--hitl', '--hitl-wait-ms', '4000000'],
+  // These tests run with HEADLESS=true, i.e. unattended: console flags have nothing to configure.
+  ['--sandbox', '--hitl-port', '4100'],
+  ['--sandbox', '--hitl-wait-ms', '60000'],
+  ['--sandbox', '--unattended', '--hitl-port', '4100'],
+  ['--sandbox', '--hitl-port', '70000'],
+  ['--sandbox', '--hitl-wait-ms', '500'],
+  ['--sandbox', '--hitl-wait-ms', '4000000'],
+  ['--sandbox', '--hitl'],
 ])('fails closed on incompatible or invalid options %j', async (...options) => {
   const { result } = await run([...invocation, ...options]);
   expect(result).toMatchObject({ kind: 'FAILURE', code: 'CLI_INVALID', atStep: null, evidence: [] });
 }, 30_000);
 
-it('refuses a human handoff nobody could see: --hitl requires a headed browser', async () => {
-  const { result, stdout } = await run([...invocation, ...verification, '--hitl'], { HEADLESS: 'true' });
-  expect(result).toMatchObject({ kind: 'FAILURE', code: 'CONFIG_ERROR', atStep: null, evidence: [] });
-  expect(stdout).not.toContain('HITL_TOKEN');
-}, 30_000);
+it('runs unattended when nobody could see the browser, with evidence instead of a pause', async () => {
+  // HEADLESS=true (set by this harness) or --unattended: no console is opened, and the unfamiliar
+  // notice ends the run as a failure with evidence rather than waiting for an operator.
+  for (const extra of [[], ['--unattended']]) {
+    const { result, stdout } = await run([...invocation, ...verification, '--fault', 'unexpected_confirm', ...extra]);
+    expect(result).toMatchObject({ kind: 'FAILURE', code: 'UNEXPECTED_DIALOG', atStep: 'open_search' });
+    expect(stdout).not.toContain('HITL_TOKEN');
+  }
+}, 60_000);
 
 it('does not echo secrets supplied in unknown options', async () => {
   const secret = 'unknown-option-synthetic-secret';

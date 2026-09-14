@@ -9,22 +9,27 @@ attended replay in the browser test suite are real.
 
 ## Run It
 
+Handoff is not a mode. Every `pnpm agent`, `pnpm discover` and `pnpm replay` run is **attended**
+by default: the browser window is visible and an operator console is open, so a stuck run pauses
+for you. `--unattended` (or `HEADLESS=true` in the environment) makes a run headless with no
+console; the same conditions then end it with `NEEDS_HUMAN` / `BLOCKED` evidence instead of a
+pause nobody will answer. Verification runs and the test suite are always unattended.
+
 ```bash
 # From the goal-driven entrypoint (discovery or replay, whichever the router picks):
-HEADLESS=false pnpm agent --goal "What is the current savings balance for member 12345?" \
-  --sandbox --fault unexpected_confirm --hitl [--hitl-port 4100] [--hitl-wait-ms 300000]
+pnpm agent --goal "What is the current savings balance for member 12345?" \
+  --sandbox --fault unexpected_confirm [--hitl-port 4100] [--hitl-wait-ms 300000]
 
 # From a direct replay:
-HEADLESS=false pnpm replay --artifact examples/get-member-savings-balance.json \
-  --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault unexpected_confirm --hitl
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault unexpected_confirm
 
 # Reproducible discovery handoff with the live model and a scripted operator (see the file header):
 pnpm exec tsx scripts/hitl-discovery-demo.ts artifacts/runs
 ```
 
-`--hitl` requires a headed browser (`HEADLESS=false`), because a handoff nobody can see is just
-a longer failure. On start the CLI prints, to stderr only, the loopback endpoint and a one-time
-per-run bearer token:
+On start the CLI prints, to stderr only, the loopback endpoint and a one-time per-run bearer
+token:
 
 ```text
 [hitl] operator endpoint http://127.0.0.1:4100
@@ -71,7 +76,7 @@ Implemented in `src/hitl/interventions.ts` (`InterventionBroker`) and driven by 
 
 ## Triggers
 
-| Where | Trigger | Without `--hitl` |
+| Where | Trigger | Unattended |
 | --- | --- | --- |
 | replay | an unknown dialog (`UNEXPECTED_DIALOG`) on a page whose surface is still healthy | `FAILURE / UNEXPECTED_DIALOG` |
 | discovery | an unknown dialog before the model is asked, or between its decision and dispatch | `BLOCKED / UNEXPECTED_DIALOG` |
