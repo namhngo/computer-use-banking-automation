@@ -1,42 +1,18 @@
 # Computer-Use Banking Automation
 
-A take-home prototype for LLM-driven UI discovery followed by deterministic capability replay.
-The implementation is deliberately incremental and targets one synthetic local web app.
+An LLM discovers how to operate a legacy-style banking UI once; that run is compiled into a
+typed, versioned capability artifact; and every later invocation is deterministic, model-free
+replay under a policy layer the model cannot bypass.
 
-## Current Status
+One capability is implemented end to end — `get_member_savings_balance` — against "Harbor Core",
+an owned server-rendered mock (login → member search → member detail, with the accounts table
+inside an iframe, no test IDs, plus nine injectable fault scenarios).
 
-Phases 0-3 provide the local Harbor sandbox, typed capability contracts, registry, and working
-model-free replay through Playwright with browser/network policy enforcement and private evidence.
-Phase 4 adds a bounded discovery loop in which an OpenAI tool-calling model chooses actions from
-redacted live observations while the engine classifies, authorizes, and dispatches each one.
-Phase 5 compiles the resulting transcript into a draft artifact and verifies it by model-free
-replay in fresh sandboxes before publishing a verified revision.
-Phase 6 adds same-session human handoff: replay pauses on an unknown dialog, an operator claims
-the very same headed browser through a loopback API, their actions are recorded in sanitized
-form and still bound by policy, and automation resumes only after validating the resume.
-Phase 7 adds the goal-driven entrypoint `pnpm agent --goal`: one structured model call routes a
-goal to a verified capability (model-free replay), to discovery followed by compile and
-fresh-sandbox verification, to a clarifying question, or to a refusal.
-Verified on Node 22.22.1: lint, strict typechecking, 795 unit/contract/HTTP/CLI tests, and 172 browser tests pass.
-
-Genuine live `gpt-4.1` discovery runs (success and not-found) are reviewed and published in
-[evidence/discovery-phase4](evidence/discovery-phase4/README.md). Phase 5 compiles that live
-transcript into a capability artifact, verifies it by model-free replay with two members in fresh
-sandboxes, and publishes a verified revision that the production replay path then executes; see
-[evidence/compile-phase5](evidence/compile-phase5/README.md). Offline tests drive the same
-loops with explicitly test-only models (`source: "test"`). Real attended and unattended handoff
-runs are in [evidence/hitl-phase6](evidence/hitl-phase6/README.md). Real live-router runs —
-cold discover→compile→verify, warm replay, clarify, refuse, and a policy denial that was not
-routed around — are in [evidence/agent-phase7](evidence/agent-phase7/README.md).
-
-[REPORT.md](REPORT.md) is the assignment write-up: architecture, artifact schema, determinism
-and error handling, heterogeneity and multi-tenant design, escalation and handoff, safety, and
-what was cut. It describes only what is built and links each claim to evidence.
-See [the proposal](docs/PROPOSAL.md) for the architecture, review decisions, and phase gates.
-See [the contract guide](docs/CONTRACTS.md), [the replay guide](docs/REPLAY.md),
-[the discovery guide](docs/DISCOVERY.md), [the compile guide](docs/COMPILE.md),
-[the handoff guide](docs/HITL.md), and [the router guide](docs/ROUTER.md) for implemented
-semantics and limitations.
+- **[REPORT.md](REPORT.md)** — the design write-up (architecture, schema, determinism, safety, cuts).
+- **[evidence/](evidence/README.md)** — real runs: live `gpt-4.1` discovery, the compiled artifact,
+  model-free replays, an error state, and same-session human handoff.
+- Verified on Node 22.22.1: lint, strict typechecking, **795** unit/contract/CLI tests and
+  **172** real-browser tests pass with no model key.
 
 ## Setup
 
@@ -47,6 +23,7 @@ Alternatively, install the exact version with `npm install --global pnpm@11.13.0
 ```bash
 pnpm install --frozen-lockfile
 pnpm browser:install
+cp .env.example .env     # then set MOCK_USERNAME / MOCK_PASSWORD (local-only, 8+ chars)
 pnpm config:check
 pnpm check
 ```
@@ -61,6 +38,90 @@ Dependency and browser installation require internet access. After installation,
 without model keys or external services. Tests start and stop their own loopback servers on
 temporary ports; there is no need to run `pnpm mock-app` first. No screenshots, videos, traces,
 credentials, or browser storage are persisted by the tests.
+
+**Keys.** Only `pnpm discover` and `pnpm agent` read `OPENAI_API_KEY` (set it in `.env`), and
+only for the model calls themselves. Everything else — replay, compile, verification, handoff,
+and the entire test suite — runs with no key and makes no provider calls. Without a key those
+two commands fail closed with `MODEL_NOT_CONFIGURED` and never fall back to a fake model.
+
+## Demo Path
+
+The full required thread: **a goal → a real LLM run that completes it → a saved capability
+artifact → deterministic model-free replay, including an error state.** Each command owns its
+own fresh sandbox and Chromium session via `--sandbox`, so no separate server is needed.
+
+```bash
+# 1. Run the agent on a goal. A live gpt-4.1 observe→decide→act loop drives the real UI.
+#    Prints a run ID and SUCCESS with savingsBalanceCents: 123456, currency: "USD".
+pnpm discover --goal "look up member 12345 and read their current savings balance" --sandbox
+
+# 1b. A second goal against a member that does not exist, so the compiled artifact also
+#     learns the MEMBER_NOT_FOUND outcome handler. Prints its own run ID.
+pnpm discover --goal "look up member 99999 and read their current savings balance" --sandbox
+
+# 2. Compile those transcripts into a versioned artifact, then verify it by model-free replay
+#    in two brand-new sandboxes. Saves draft v1, and on two successes publishes verified v2.
+pnpm compile --run <success-runId> --outcome-run <not-found-runId> \
+  --verify --sandbox --verify-inputs '{"memberId":"12345"}' --verify-inputs '{"memberId":"67890"}'
+
+# 3. Replay the resulting artifact. No model is involved in any decision.
+pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"67890"}' --sandbox
+#   SUCCESS, savingsBalanceCents 987654 — a member the model never saw
+
+# 3b. The same artifact against a missing member: an expected business outcome, not a crash.
+pnpm replay get_member_savings_balance --version 2 --inputs '{"memberId":"99999"}' --sandbox
+#   BUSINESS_OUTCOME / MEMBER_NOT_FOUND, exit 0
+```
+
+**One-command variant** (Section 8 stretch goal — the agent-facing capability interface): the
+router takes the goal, inspects the verified catalog, and either replays an existing capability
+or runs the discover→compile→verify chain itself.
+
+```bash
+pnpm agent --goal "look up member 12345 and read their current savings balance" \
+  --sandbox --verify-inputs '{"memberId":"67890"}'    # cold: catalog empty → discover → publish v2
+pnpm agent --goal "look up member 67890 and read their current savings balance" --sandbox
+#   warm: routes to the verified capability → model-free replay, no discovery call
+```
+
+Verification always replays at least two *distinct* inputs, so a value hardcoded during discovery
+cannot pass. `pnpm compile` therefore requires two `--verify-inputs`; `pnpm agent` requires only
+one, because it contributes the goal's own member as the first.
+
+**Without a model key**, the deterministic half of the thread still runs in full using the
+checked-in authored draft:
+
+```bash
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification   # SUCCESS
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"99999"}' --sandbox --mode verification   # BUSINESS_OUTCOME
+pnpm replay --artifact examples/get-member-savings-balance.json \
+  --inputs '{"memberId":"12345"}' --sandbox --mode verification --fault permission_denied
+#   FAILURE / PERMISSION_DENIED with a structural DOM snapshot, exit 1
+```
+
+Reviewed logs for all of the above are committed under [evidence/](evidence/README.md).
+Expanded walkthroughs of each stage, including flags and failure modes, are in the
+[Replay](#replay-demo), [Human Handoff](#human-handoff-demo), [Discovery](#discovery-demo),
+[Compile and Verify](#compile-and-verify-demo), and [Agent](#agent-demo) sections below.
+
+## Core Requirements Map
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| 3.1 Goal-driven agent loop | `src/discovery/engine.ts` — bounded observe→decide→act; one strict-schema tool call per turn | [discovery-phase4](evidence/discovery-phase4/README.md) |
+| 3.2 Structured artifact | `src/artifact/schema.ts`; compiled by `src/compiler/compile.ts` | [v2 verified artifact](evidence/compile-phase5/get_member_savings_balance.v2.verified.json) |
+| 3.3 Deterministic replay | `src/replay/engine.ts`; result contract in `src/artifact/result.ts` | [compile-phase5](evidence/compile-phase5/README.md), [replay-phase3](evidence/replay-phase3/README.md) |
+| 3.4 Safety & policy guardrails | `policy.yaml`, `src/policy/policy.ts`, `src/surface/harbor-profile.ts`, `src/surface/network.ts` | [agent-phase7](evidence/agent-phase7/README.md) (refusal, denial) |
+| 3.5 Evidence / observability | `src/evidence/evidence.ts` — structural `events.jsonl` + DOM snapshot on failure | every run directory |
+| 3.6 Human-in-the-loop handoff | `src/hitl/` broker + loopback operator API; same headed browser | [hitl-phase6](evidence/hitl-phase6/README.md) |
+| 3.7 Heterogeneity & multi-tenant | `SurfaceAdapter` seam implemented; tenant overrides are design-only | [REPORT.md](REPORT.md) §Heterogeneity |
+
+Design rationale and trade-offs for each of these live in [REPORT.md](REPORT.md). Deeper
+per-stage docs: [contracts](docs/CONTRACTS.md), [replay](docs/REPLAY.md),
+[discovery](docs/DISCOVERY.md), [compile](docs/COMPILE.md), [handoff](docs/HITL.md),
+[router](docs/ROUTER.md), and the original [proposal](docs/PROPOSAL.md).
 
 ## Commands
 
@@ -240,7 +301,9 @@ For details and supported limits, see [CONTRACTS.md](docs/CONTRACTS.md).
 
 ## Replay Demo
 
-With mock credentials configured in `.env`, run the authored draft against a fresh sandbox:
+Detailed reference for the replay stage. These use the checked-in authored draft, so they need
+no model key, and together they exercise all four result kinds — success, business outcome,
+bounded recovery, and hard failure:
 
 ```bash
 pnpm replay --artifact examples/get-member-savings-balance.json \
