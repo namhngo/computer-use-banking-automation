@@ -109,7 +109,11 @@ it('connects the real SDK tool parser to the real browser with an explicitly tes
         const text = message.content.find((entry) => entry.type === 'text');
         if (!text || text.type !== 'text') throw new Error('Expected text context');
         const intent = options.toolChoice?.type === 'tool' && options.toolChoice.toolName === 'plan_goal';
-        const choice = intent ? { tool: 'plan_goal', input: ready() }
+        // Through the SDK the contract travels in the tool's array form; the engine folds it into records.
+        const goal = savingsSpec('12345');
+        const choice = intent ? { tool: 'plan_goal', input: { status: 'ready', goal: { name: goal.name, description: goal.description,
+          inputs: Object.entries(goal.inputs).map(([name, input]) => ({ name, ...input })),
+          outputs: Object.entries(goal.outputs).map(([name, output]) => ({ name, ...output })) } } }
           : chooseRead(JSON.parse(text.text) as Context);
         sequence++;
         return Promise.resolve({

@@ -143,8 +143,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     return finish({ kind: 'EXECUTED', capability, result });
   }
 
-  // discover
-  if (catalog.length > 0) return finish({ kind: 'FAILURE', code: 'DISCOVERY_NOT_NEEDED' });
+  // discover: the catalog is what has been learned so far, not the limit of the application, so an
+  // existing capability for a different read never blocks learning a new one.
   if (!options.discoveryModel) return finish({ kind: 'FAILURE', code: 'MODEL_NOT_CONFIGURED' });
   const discovery: DiscoveryResult = await runDiscovery({
     goal, model: options.discoveryModel, origin, policy: options.policy, credentials, ...passthrough,

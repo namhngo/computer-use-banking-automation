@@ -1,0 +1,14 @@
+{
+  "runId": "run_b8cef5803af9421eaf0183049793803d",
+  "atStep": "click_t3",
+  "evidence": [
+    "events.jsonl",
+    "snapshot_1.json"
+  ],
+  "recoveries": [],
+  "kind": "FAILURE",
+  "code": "CHECKPOINT_FAILED",
+  "message": "CHECKPOINT_FAILED",
+  "expected": "Complete click with a unique permitted target and valid conditions.",
+  "observed": "CHECKPOINT_FAILED"
+}

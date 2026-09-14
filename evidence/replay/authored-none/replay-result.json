@@ -1,0 +1,13 @@
+{
+  "runId": "run_4c25c8ec814f4089a9ab82f220a8e18b",
+  "atStep": "extract_currency",
+  "evidence": [
+    "events.jsonl"
+  ],
+  "recoveries": [],
+  "kind": "SUCCESS",
+  "outputs": {
+    "savingsBalanceCents": 123456,
+    "currency": "USD"
+  }
+}

@@ -1,7 +1,7 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText, isStepCount, wrapLanguageModel, type LanguageModel, type ToolSet } from 'ai';
 import {
-  intentSchema, ModelCallError, parseDecision, toolInputSchemas, usageSchema,
+  intentFromTool, intentToolSchema, ModelCallError, parseDecision, toolInputSchemas, usageSchema,
   type DiscoveryDecision, type DiscoveryIntent, type GoalSpec, type ModelCallReceipt, type ModelReply,
 } from './contracts.js';
 import { createSecretGuard } from './privacy.js';
@@ -41,7 +41,7 @@ export type DiscoveryModel = {
 };
 
 const intentTools = {
-  plan_goal: { description: 'Declare the read-only goal contract: inputs that select the record and outputs to read.', inputSchema: intentSchema },
+  plan_goal: { description: 'Declare the read-only goal contract: inputs that select the record and outputs to read.', inputSchema: intentToolSchema },
 } satisfies ToolSet;
 
 function decisionTools(spec: GoalSpec): ToolSet {
@@ -186,7 +186,7 @@ export function createDiscoveryModel(configuration: ModelConfiguration): Discove
     source, provider, modelId, secretValues: secrets,
     intent: (goal, signal) => call(INTENT_INSTRUCTIONS, { goal }, signal, intentTools, (name, input) => {
       if (name !== 'plan_goal') throw new Error('Invalid discovery intent.');
-      return intentSchema.parse(input);
+      return intentFromTool(input);
     }, 'plan_goal'),
     decide: (spec, context, signal) => {
       const schemas = toolInputSchemas(spec);

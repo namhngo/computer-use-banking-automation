@@ -1,0 +1,31 @@
+{
+  "kind": "VERIFIED",
+  "draft": {
+    "appId": "harbor_core",
+    "appVersion": "1.0",
+    "name": "get_member_savings_balance",
+    "version": 1
+  },
+  "verified": {
+    "appId": "harbor_core",
+    "appVersion": "1.0",
+    "name": "get_member_savings_balance",
+    "version": 2
+  },
+  "attempts": [
+    {
+      "runId": "run_df036093077d47baacdee6fa2871bdda",
+      "kind": "SUCCESS",
+      "evidence": [
+        "events.jsonl"
+      ]
+    },
+    {
+      "runId": "run_e88b029cb8ea435baf41265b67b68846",
+      "kind": "SUCCESS",
+      "evidence": [
+        "events.jsonl"
+      ]
+    }
+  ]
+}

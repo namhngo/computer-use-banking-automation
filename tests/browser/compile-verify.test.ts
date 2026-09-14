@@ -14,11 +14,11 @@ import { runReplay } from '../../src/replay/engine.js';
 
 const credentials = { username: 'compile-synthetic-operator', password: 'compile-synthetic-password' };
 const basePolicy = await loadPolicy(new URL('../../policy.yaml', import.meta.url).pathname);
-const evidence = (name: string) => JSON.parse(readFileSync(new URL(`../../evidence/discovery-phase4/${name}/discovery.json`, import.meta.url), 'utf8')) as unknown;
+const evidence = (name: string) => JSON.parse(readFileSync(new URL(`../../evidence/agent/${name}/discovery/discovery.json`, import.meta.url), 'utf8')) as unknown;
 const app = { appId: 'harbor_core', appVersion: '1.0' } as const;
 const key = (version: number) => ({ ...app, name: 'get_member_savings_balance', version });
-const draft = compileTranscript(evidence('success'), { name: 'get_member_savings_balance', version: 1, app,
-  recordedAt: '2026-09-12T21:00:00.000Z', outcomeTranscripts: [evidence('not-found')], sensitiveValues: Object.values(credentials) });
+const draft = compileTranscript(evidence('cold-savings'), { name: 'get_member_savings_balance', version: 1, app,
+  recordedAt: '2026-09-12T21:00:00.000Z', outcomeTranscripts: [evidence('cold-not-found')], sensitiveValues: Object.values(credentials) });
 
 let root: string;
 let spawned = 0;
@@ -39,7 +39,7 @@ async function createTarget(): Promise<VerificationTarget> {
   targets.push(target);
   return target;
 }
-const verify = (candidate: unknown, inputs = [{ memberId: '12345' }, { memberId: '67890' }]) => verifyDraft({
+const verify = (candidate: unknown, inputs = [{ member_id: '12345' }, { member_id: '67890' }]) => verifyDraft({
   draft: candidate, registry: new FileCapabilityRegistry(join(root, 'capabilities')), createTarget, inputs, credentials,
   evidenceRoot: join(root, 'runs'), headless: true, verifiedAt: '2026-09-12T21:05:00.000Z',
 });
@@ -67,27 +67,25 @@ it('verifies the artifact compiled from the live transcript with two members in 
   }
 
   // Production path: the verified revision replays for a third invocation and the observed outcome fires.
-  for (const [memberId, expected] of [
-    ['67890', { kind: 'SUCCESS', atStep: 'extract_t6', outputs: { savingsBalanceCents: 987654, currency: 'USD' } }],
-    ['99999', { kind: 'BUSINESS_OUTCOME', code: 'MEMBER_NOT_FOUND', atStep: 'click_t2' }],
+  for (const [member_id, expected] of [
+    ['67890', { kind: 'SUCCESS', atStep: 'extract_t5', outputs: { savings_balance: 987654 } }],
+    ['99999', { kind: 'BUSINESS_OUTCOME', code: 'NO_MEMBER_FOUND', atStep: 'click_t2' }],
   ] as const) {
     const target = await createTarget();
-    const result = await runReplay({ artifact: verified, inputs: { memberId }, mode: 'replay', origin: target.origin, policy: target.policy,
+    const result = await runReplay({ artifact: verified, inputs: { member_id }, mode: 'replay', origin: target.origin, policy: target.policy,
       credentials, evidenceRoot: join(root, 'runs'), headless: true });
     expect(result).toMatchObject(expected);
   }
   // The draft itself stays ineligible for production replay.
   const target = await createTarget();
-  expect(await runReplay({ artifact: draft, inputs: { memberId: '12345' }, mode: 'replay', origin: target.origin, policy: target.policy,
+  expect(await runReplay({ artifact: draft, inputs: { member_id: '12345' }, mode: 'replay', origin: target.origin, policy: target.policy,
     credentials, evidenceRoot: join(root, 'runs'), headless: true })).toMatchObject({ kind: 'FAILURE', code: 'INVOCATION_INVALID' });
 }, 60_000);
 
 it('refuses a draft with the discovery member hardcoded before any browser is started', async () => {
   const hardcoded = structuredClone(draft);
-  if (hardcoded.checkpoint.kind !== 'all') throw new Error('Expected a compound checkpoint');
-  for (const condition of hardcoded.checkpoint.conditions) {
-    if (condition.kind === 'text_equals') condition.expected = { source: 'literal', value: '12345' };
-  }
+  if (hardcoded.checkpoint.kind !== 'text_equals') throw new Error('Expected an identity checkpoint');
+  hardcoded.checkpoint.expected = { source: 'literal', value: '12345' };
   await expect(verify(hardcoded)).rejects.toThrow('known sensitive value');
   expect(spawned).toBe(0);
   await expect(readdir(join(root, 'capabilities'))).rejects.toThrow();
@@ -97,9 +95,9 @@ it('rejects a draft that only works for the discovery member through the second 
   // A literal the registry cannot know about: the discovered member's synthetic name passes for
   // 12345 and must be exposed by replaying with a different member.
   const hardcoded = structuredClone(draft);
-  if (hardcoded.checkpoint.kind !== 'all') throw new Error('Expected a compound checkpoint');
-  hardcoded.checkpoint.conditions.push({ kind: 'text_equals', expected: { source: 'literal', value: 'Avery Sample' },
-    target: { strategies: [{ kind: 'table_cell', row: { source: 'literal', value: 'Name' }, column: 2 }] } });
+  if (hardcoded.checkpoint.kind !== 'text_equals') throw new Error('Expected an identity checkpoint');
+  hardcoded.checkpoint = { kind: 'all', conditions: [hardcoded.checkpoint, { kind: 'text_equals', expected: { source: 'literal', value: 'Avery Sample' },
+    target: { strategies: [{ kind: 'table_cell', row: { source: 'literal', value: 'Name' }, column: 2 }] } }] };
   const report = await verify(hardcoded);
   expect(report).toMatchObject({ kind: 'REJECTED', draft: key(1) });
   expect(report.attempts.map((attempt) => attempt.kind)).toEqual(['SUCCESS', 'FAILURE']);

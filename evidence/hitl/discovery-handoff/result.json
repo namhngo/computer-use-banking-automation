@@ -1,0 +1,38 @@
+{
+  "kind": "SUCCESS",
+  "runId": "run_c3be6d7abc024b158264e588fce3630f",
+  "code": "COMPLETED",
+  "source": "live",
+  "turns": 8,
+  "usage": {
+    "inputTokens": 15599,
+    "outputTokens": 271
+  },
+  "usageComplete": true,
+  "evidence": [
+    "events.jsonl",
+    "snapshot_1.json",
+    "intervention_1.json",
+    "discovery.json"
+  ],
+  "goal": {
+    "name": "get_member_savings_balance",
+    "description": "Retrieve the current savings balance for a specific member by member ID.",
+    "inputs": {
+      "member_id": {
+        "value": "12345",
+        "description": "The unique identifier for the member whose savings balance is requested."
+      }
+    },
+    "outputs": {
+      "savings_balance": {
+        "parser": "usd_cents",
+        "description": "The current savings balance for the specified member.",
+        "sensitive": true
+      }
+    }
+  },
+  "outputs": {
+    "savings_balance": 123456
+  }
+}

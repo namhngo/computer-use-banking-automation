@@ -1,0 +1,44 @@
+{
+  "agentRunId": "agent_adf0e5ed3232444896bccb6d7c5c495a",
+  "source": "live",
+  "routing": {
+    "decision": "execute",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_0ebcb1c5a174df09016aa761e6530887d1b63b2d31a4d87aff",
+    "usage": {
+      "inputTokens": 781,
+      "outputTokens": 31
+    },
+    "catalog": [
+      {
+        "name": "get_member_checking_balance",
+        "version": 2
+      },
+      {
+        "name": "get_member_savings_balance",
+        "version": 2
+      }
+    ]
+  },
+  "kind": "EXECUTED",
+  "capability": {
+    "appId": "harbor_core",
+    "appVersion": "1.0",
+    "name": "get_member_savings_balance",
+    "version": 2
+  },
+  "result": {
+    "runId": "run_54419be07db44644b3e1998d876978f4",
+    "atStep": "click_t3",
+    "evidence": [
+      "events.jsonl",
+      "snapshot_1.json"
+    ],
+    "recoveries": [],
+    "kind": "FAILURE",
+    "code": "CHECKPOINT_FAILED",
+    "message": "CHECKPOINT_FAILED",
+    "expected": "Complete click with a unique permitted target and valid conditions.",
+    "observed": "CHECKPOINT_FAILED"
+  }
+}

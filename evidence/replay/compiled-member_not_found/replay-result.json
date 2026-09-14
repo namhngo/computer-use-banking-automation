@@ -1,0 +1,10 @@
+{
+  "runId": "run_64e001b7c1f848ddb88f6acd5ff6ad9a",
+  "atStep": "click_t2",
+  "evidence": [
+    "events.jsonl"
+  ],
+  "recoveries": [],
+  "kind": "BUSINESS_OUTCOME",
+  "code": "NO_MEMBER_FOUND"
+}

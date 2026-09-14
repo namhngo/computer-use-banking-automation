@@ -1,0 +1,26 @@
+{
+  "agentRunId": "agent_96888a19017a40ed9fda8c3f3b9f6243",
+  "source": "live",
+  "routing": {
+    "decision": "clarify",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_051572494665b2d1016aa761e47f0087d184c8b75852ce00ab",
+    "usage": {
+      "inputTokens": 775,
+      "outputTokens": 35
+    },
+    "catalog": [
+      {
+        "name": "get_member_checking_balance",
+        "version": 2
+      },
+      {
+        "name": "get_member_savings_balance",
+        "version": 2
+      }
+    ]
+  },
+  "kind": "CLARIFICATION_REQUIRED",
+  "reason": "missing_input",
+  "question": "What is the member ID for the savings account you want the balance for?"
+}

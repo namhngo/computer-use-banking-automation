@@ -1,0 +1,50 @@
+{
+  "agentRunId": "agent_1fd0a3e7a28d4faca2d087198a2d329b",
+  "source": "live",
+  "routing": {
+    "decision": "discover",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_014dc772766ee482016aa76224c61c87d194bc00439c036269",
+    "usage": {
+      "inputTokens": 561,
+      "outputTokens": 27
+    },
+    "catalog": []
+  },
+  "kind": "DISCOVERED",
+  "discovery": {
+    "kind": "BUSINESS_OUTCOME",
+    "runId": "run_c92971134439482684b630a725295fe0",
+    "code": "NO_MEMBER_FOUND",
+    "source": "live",
+    "turns": 4,
+    "usage": {
+      "inputTokens": 6763,
+      "outputTokens": 205
+    },
+    "usageComplete": true,
+    "evidence": [
+      "events.jsonl",
+      "snapshot_1.json",
+      "discovery.json"
+    ],
+    "goal": {
+      "name": "get_member_savings_balance",
+      "description": "Retrieve the current savings balance for a specific member by member ID.",
+      "inputs": {
+        "member_id": {
+          "value": "99999",
+          "description": "The unique identifier for the member whose savings balance is requested."
+        }
+      },
+      "outputs": {
+        "savings_balance": {
+          "parser": "usd_cents",
+          "description": "The current savings balance for the specified member.",
+          "sensitive": true
+        }
+      }
+    }
+  },
+  "compiled": null
+}

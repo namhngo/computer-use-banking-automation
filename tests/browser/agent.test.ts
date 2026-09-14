@@ -18,7 +18,7 @@ import { loadPolicy, parsePolicy } from '../../src/policy/policy.js';
 const credentials = { username: 'agent-synthetic-operator', password: 'agent-synthetic-password' };
 const basePolicy = await loadPolicy(new URL('../../policy.yaml', import.meta.url).pathname);
 const verifiedArtifact = parseArtifact(JSON.parse(readFileSync(
-  new URL('../../evidence/compile-phase5/get_member_savings_balance.v2.verified.json', import.meta.url), 'utf8')) as unknown);
+  new URL('../../evidence/compile/harbor_core--1.0--get_member_savings_balance--2.json', import.meta.url), 'utf8')) as unknown);
 const app = { appId: 'harbor_core', appVersion: '1.0' } as const;
 const key = (version: number) => ({ ...app, name: 'get_member_savings_balance', version });
 const goal = (memberId: string) => `look up member ${memberId} and read their current savings balance`;
@@ -173,18 +173,20 @@ it('warm run against a seeded registry executes the verified revision only, and 
   const registry = new FileCapabilityRegistry(join(root, 'capabilities'));
   await registry.save(verifiedArtifact);
   const untouched = { intent: 0, decide: 0 };
-  const ok = await agent(await listen('none'), { goal: goal('67890'), router: router(() => execute(2, '67890')),
+  // The seeded artifact was compiled from a live run whose model named the input member_id.
+  const seeded = (memberId: string): RouteDecision => ({ tool: 'execute', input: { capability: 'get_member_savings_balance', version: 2, inputs: { member_id: memberId } } });
+  const ok = await agent(await listen('none'), { goal: goal('67890'), router: router(() => seeded('67890')),
     discoveryModel: scriptedDiscovery('67890', untouched), registry });
-  expect(ok).toMatchObject({ kind: 'EXECUTED', result: { kind: 'SUCCESS', outputs: { savingsBalanceCents: 987654 } } });
+  expect(ok).toMatchObject({ kind: 'EXECUTED', result: { kind: 'SUCCESS', outputs: { savings_balance: 987654 } } });
 
-  const denied = await agent(await listen('permission_denied'), { goal: goal('12345'), router: router(() => execute(2, '12345')),
+  const denied = await agent(await listen('permission_denied'), { goal: goal('12345'), router: router(() => seeded('12345')),
     discoveryModel: scriptedDiscovery('12345', untouched), registry });
   expect(denied).toMatchObject({ kind: 'EXECUTED', capability: key(2), result: { kind: 'FAILURE' } });
   if (denied.kind !== 'EXECUTED' || denied.result.kind !== 'FAILURE') throw new Error('Expected a replay failure');
   expect(denied.result.code).toMatch(/^[A-Z_]+$/);
 
   // A model-chosen input that fails the artifact's input contract is rejected before any browser starts.
-  const invalid = await agent(await listen('none'), { router: router(() => execute(2, '1234')), discoveryModel: scriptedDiscovery('1234', untouched), registry });
+  const invalid = await agent(await listen('none'), { router: router(() => seeded('1234')), discoveryModel: scriptedDiscovery('1234', untouched), registry });
   expect(invalid).toMatchObject({ kind: 'EXECUTED', result: { kind: 'FAILURE', code: 'INPUT_INVALID' } });
   expect(untouched).toEqual({ intent: 0, decide: 0 });
   expect(spawnedSandboxes).toBe(0);

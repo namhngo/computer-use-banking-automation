@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import * as ai from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { intentSchema, ModelCallError } from './contracts.js';
+import { intentToolSchema, ModelCallError } from './contracts.js';
 import { DISCOVERY_INSTRUCTIONS, INTENT_INSTRUCTIONS, PROMPT_VERSION, createDiscoveryModel, readDiscoveryModel } from './model.js';
 
 vi.mock('ai', { spy: true });
@@ -19,6 +19,14 @@ const spec = {
   },
 } as const;
 const ready = { status: 'ready', goal: spec };
+/** What the model actually emits: names as array items. */
+const asTool = (intent: { status: string; goal: typeof spec | null | Record<string, unknown> }) => intent.goal === null ? intent : {
+  status: intent.status, goal: {
+    name: (intent.goal as typeof spec).name, description: (intent.goal as typeof spec).description,
+    inputs: Object.entries((intent.goal as typeof spec).inputs).map(([name, input]) => ({ name, ...input })),
+    outputs: Object.entries((intent.goal as typeof spec).outputs).map(([name, output]) => ({ name, ...output })),
+  },
+};
 const click = { ref: 'e1_2', reason: 'inspect_state' };
 const mockReceipt = { usage: { inputTokens: 12, outputTokens: 7 }, modelId: 'served-model-v1', responseId: 'response-1' };
 
@@ -53,7 +61,7 @@ afterEach(() => {
 
 describe('createDiscoveryModel', () => {
   it('uses the real SDK for one forced intent call with bounded, private options', async () => {
-    const { sdk, client } = setup(response([toolCall('plan_goal', ready)]));
+    const { sdk, client } = setup(response([toolCall('plan_goal', asTool(ready))]));
     const abortSignal = signal();
     expect(await client.intent('Read savings for member 12345', abortSignal)).toEqual({
       value: ready, usage: { inputTokens: 12, outputTokens: 7 }, modelId: 'served-model-v1', responseId: 'response-1',
@@ -79,13 +87,13 @@ describe('createDiscoveryModel', () => {
     expect(options).not.toHaveProperty('reasoning');
     expect(Object.keys(options?.tools ?? {})).toEqual(['plan_goal']);
     expect(options?.tools?.plan_goal?.description).toEqual(expect.any(String));
-    expect(options?.tools?.plan_goal?.inputSchema).toBe(intentSchema);
+    expect(options?.tools?.plan_goal?.inputSchema).toBe(intentToolSchema);
     expect(ai.isStepCount).toHaveBeenCalledWith(1);
   });
 
   it('returns all valid intent statuses without heuristics or conversation carryover', async () => {
     const values = [ready, { status: 'clarify', goal: null }, { status: 'unsupported', goal: null }];
-    const sdk = new MockLanguageModelV4({ doGenerate: values.map((value) => response([toolCall('plan_goal', value)])) });
+    const sdk = new MockLanguageModelV4({ doGenerate: values.map((value) => response([toolCall('plan_goal', asTool(value))])) });
     const client = createDiscoveryModel({ model: sdk, modelId: 'neutral-model', provider: 'neutral', source: 'test' });
     for (const value of values) {
       expect((await client.intent('A goal interpreted by the model', signal())).value).toEqual(value);
@@ -163,10 +171,13 @@ describe('createDiscoveryModel', () => {
     }
     for (const content of [
       toolCall('plan_goal', { status: 'ready', goal: null }),
-      toolCall('plan_goal', { status: 'clarify', goal: spec }),
-      toolCall('plan_goal', { status: 'ready', goal: { ...spec, outputs: {} } }),
-      toolCall('plan_goal', { status: 'ready', goal: { ...spec, inputs: { savingsBalanceCents: spec.inputs.memberId } } }),
-      toolCall('plan_goal', { status: 'ready', goal: { ...spec, name: 'Get Balance' } }),
+      toolCall('plan_goal', asTool({ status: 'clarify', goal: spec })),
+      toolCall('plan_goal', asTool({ status: 'ready', goal: { ...spec, outputs: {} } })),
+      toolCall('plan_goal', asTool({ status: 'ready', goal: { ...spec, inputs: { savingsBalanceCents: spec.inputs.memberId } } })),
+      toolCall('plan_goal', asTool({ status: 'ready', goal: { ...spec, name: 'Get Balance' } })),
+      // The record form is not what the tool declares; a flattened value is refused rather than guessed.
+      toolCall('plan_goal', ready),
+      toolCall('plan_goal', { status: 'ready', goal: { ...asTool(ready).goal, inputs: [{ name: 'memberId', value: '12345', description: 'x' }, { name: 'memberId', value: '12345', description: 'y' }] } }),
       toolCall('plan_goal', { ...ready, plan: ['invented'] }),
       toolCall('click', click),
     ]) {
@@ -333,7 +344,7 @@ describe('readDiscoveryModel', () => {
   it('sends a non-stored OpenAI Responses request with one named tool and preserves served metadata', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({
       id: 'resp-served', object: 'response', created_at: 1, status: 'completed', model: 'gpt-4.1-served-version',
-      output: [{ type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'plan_goal', arguments: JSON.stringify(ready), status: 'completed' }],
+      output: [{ type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'plan_goal', arguments: JSON.stringify(asTool(ready)), status: 'completed' }],
       incomplete_details: null, error: null, usage: { input_tokens: 21, output_tokens: 9, total_tokens: 30 },
     }));
     vi.stubGlobal('fetch', fetch);

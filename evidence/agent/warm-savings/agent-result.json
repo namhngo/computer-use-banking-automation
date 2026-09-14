@@ -1,0 +1,42 @@
+{
+  "agentRunId": "agent_8b74089cc290446ea888beb7bdf97517",
+  "source": "live",
+  "routing": {
+    "decision": "execute",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_0296c43c47e2fd13016aa761d5d6c887d1a150e35271b93cf6",
+    "usage": {
+      "inputTokens": 781,
+      "outputTokens": 31
+    },
+    "catalog": [
+      {
+        "name": "get_member_checking_balance",
+        "version": 2
+      },
+      {
+        "name": "get_member_savings_balance",
+        "version": 2
+      }
+    ]
+  },
+  "kind": "EXECUTED",
+  "capability": {
+    "appId": "harbor_core",
+    "appVersion": "1.0",
+    "name": "get_member_savings_balance",
+    "version": 2
+  },
+  "result": {
+    "runId": "run_1347f9fbc0f9458aa966cd1a737bbf0f",
+    "atStep": "extract_t5",
+    "evidence": [
+      "events.jsonl"
+    ],
+    "recoveries": [],
+    "kind": "SUCCESS",
+    "outputs": {
+      "savings_balance": 987654
+    }
+  }
+}

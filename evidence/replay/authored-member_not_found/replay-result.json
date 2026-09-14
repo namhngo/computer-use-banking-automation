@@ -1,0 +1,10 @@
+{
+  "runId": "run_724030d2c662436db7f97f147c60301c",
+  "atStep": "search",
+  "evidence": [
+    "events.jsonl"
+  ],
+  "recoveries": [],
+  "kind": "BUSINESS_OUTCOME",
+  "code": "MEMBER_NOT_FOUND"
+}

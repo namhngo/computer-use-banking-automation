@@ -1,0 +1,20 @@
+{
+  "runId": "run_7da31b33099b44158b587407cae17078",
+  "atStep": "extract_currency",
+  "evidence": [
+    "events.jsonl"
+  ],
+  "recoveries": [
+    {
+      "code": "SESSION_EXPIRED",
+      "atStep": "search",
+      "attempt": 1,
+      "outcome": "recovered"
+    }
+  ],
+  "kind": "SUCCESS",
+  "outputs": {
+    "savingsBalanceCents": 123456,
+    "currency": "USD"
+  }
+}

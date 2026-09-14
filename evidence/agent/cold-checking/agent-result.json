@@ -1,0 +1,74 @@
+{
+  "agentRunId": "agent_5a0cc7cf3c6548c6ac792f6c18468bf3",
+  "source": "live",
+  "routing": {
+    "decision": "discover",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_07e54e8b06c49098016aa761c987a887d1aac3267154151990",
+    "usage": {
+      "inputTokens": 673,
+      "outputTokens": 27
+    },
+    "catalog": [
+      {
+        "name": "get_member_savings_balance",
+        "version": 2
+      }
+    ]
+  },
+  "kind": "DISCOVERED",
+  "discovery": {
+    "kind": "SUCCESS",
+    "runId": "run_9dd52a57ee6d42e39df8edabdf5ab0fc",
+    "code": "COMPLETED",
+    "source": "live",
+    "turns": 7,
+    "usage": {
+      "inputTokens": 15449,
+      "outputTokens": 345
+    },
+    "usageComplete": true,
+    "evidence": [
+      "events.jsonl",
+      "discovery.json"
+    ],
+    "goal": {
+      "name": "get_member_checking_balance",
+      "description": "Retrieve the checking account balance for a specific member.",
+      "inputs": {
+        "member_id": {
+          "value": "67890",
+          "description": "The unique identifier for the member whose checking account balance is requested."
+        }
+      },
+      "outputs": {
+        "checking_account_balance": {
+          "parser": "usd_cents",
+          "description": "The current balance of the member's checking account.",
+          "sensitive": true
+        }
+      }
+    },
+    "outputs": {
+      "checking_account_balance": 8000
+    }
+  },
+  "compiled": {
+    "draft": {
+      "appId": "harbor_core",
+      "appVersion": "1.0",
+      "name": "get_member_checking_balance",
+      "version": 1
+    },
+    "verified": {
+      "appId": "harbor_core",
+      "appVersion": "1.0",
+      "name": "get_member_checking_balance",
+      "version": 2
+    },
+    "verificationRuns": [
+      "run_d9db8abe58424559a44402be08f83a4c",
+      "run_e948a01df9a0440aa29e2d86ed699920"
+    ]
+  }
+}

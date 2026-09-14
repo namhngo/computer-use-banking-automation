@@ -14,9 +14,9 @@ import { agentResultSchema, parseRouteDecision, type RouteDecision, type RouterM
 import { createRouterModel, ROUTER_INSTRUCTIONS } from './model.js';
 
 const verified = parseArtifact(JSON.parse(readFileSync(
-  new URL('../../evidence/compile-phase5/get_member_savings_balance.v2.verified.json', import.meta.url), 'utf8')) as unknown);
+  new URL('../../evidence/compile/harbor_core--1.0--get_member_savings_balance--2.json', import.meta.url), 'utf8')) as unknown);
 const draft = parseArtifact(JSON.parse(readFileSync(
-  new URL('../../evidence/compile-phase5/get_member_savings_balance.v1.draft.json', import.meta.url), 'utf8')) as unknown);
+  new URL('../../evidence/compile/harbor_core--1.0--get_member_savings_balance--1.json', import.meta.url), 'utf8')) as unknown);
 const policy = await loadPolicy(new URL('../../policy.yaml', import.meta.url).pathname);
 const credentials = { username: 'agent-synthetic-operator', password: 'agent-synthetic-password' };
 const secret = 'synthetic-router-provider-key';
@@ -58,10 +58,9 @@ describe('catalog', () => {
     const catalog = buildCatalog([draft, other, older, verified], { appId: 'harbor_core', appVersion: '1.0' });
     expect(catalog).toEqual([{
       name: 'get_member_savings_balance', version: 2, description: verified.identity.description, risk: 'read_only',
-      inputs: { memberId: { description: verified.inputs.memberId!.description, type: 'string', format: 'digits', minLength: 5, maxLength: 5 } },
+      inputs: { member_id: { description: verified.inputs.member_id!.description, type: 'string', format: 'digits', minLength: 5, maxLength: 5 } },
       outputs: {
-        savingsBalanceCents: { description: verified.outputs.savingsBalanceCents!.description, type: 'number' },
-        currency: { description: verified.outputs.currency!.description, type: 'string' },
+        savings_balance: { description: verified.outputs.savings_balance!.description, type: 'number' },
       },
     }]);
     expect(JSON.stringify(catalog)).not.toMatch(/"steps"|"selector"|"strategies"|"checkpoint"|"kind"/);
@@ -138,11 +137,8 @@ describe('runAgent without a browser', () => {
       .toMatchObject({ kind: 'FAILURE', code: 'CAPABILITY_NOT_FOUND' });
   });
 
-  it('never discovers when a verified capability exists, and never discovers without a discovery model', async () => {
-    const registry = new FileCapabilityRegistry(join(root, 'capabilities'));
-    await registry.save(verified);
+  it('never discovers without a discovery model, even when the router asks to', async () => {
     const discover: RouteDecision = { tool: 'discover', input: { reason: 'no_compatible_capability', inputs: { memberId: '12345' } } };
-    expect(await runAgent(options(fakeRouter(() => discover), { registry }))).toMatchObject({ kind: 'FAILURE', code: 'DISCOVERY_NOT_NEEDED' });
     const withoutModel: Partial<AgentOptions> = options(fakeRouter(() => discover), { registry: new FileCapabilityRegistry(join(root, 'empty')) });
     delete withoutModel.discoveryModel;
     expect(await runAgent(withoutModel as AgentOptions)).toMatchObject({ kind: 'FAILURE', code: 'MODEL_NOT_CONFIGURED', routing: { catalog: [] } });

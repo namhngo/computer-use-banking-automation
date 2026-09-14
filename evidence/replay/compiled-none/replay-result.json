@@ -1,0 +1,12 @@
+{
+  "runId": "run_8007f902053f463a818a6c1062a866e7",
+  "atStep": "extract_t5",
+  "evidence": [
+    "events.jsonl"
+  ],
+  "recoveries": [],
+  "kind": "SUCCESS",
+  "outputs": {
+    "savings_balance": 123456
+  }
+}

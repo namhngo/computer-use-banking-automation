@@ -1,0 +1,69 @@
+{
+  "agentRunId": "agent_a05449c1b3594cc2a6334f26da975ba5",
+  "source": "live",
+  "routing": {
+    "decision": "discover",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_0e48231330bd76fc016aa761be480c87d18ec15dd2cac812ec",
+    "usage": {
+      "inputTokens": 561,
+      "outputTokens": 27
+    },
+    "catalog": []
+  },
+  "kind": "DISCOVERED",
+  "discovery": {
+    "kind": "SUCCESS",
+    "runId": "run_d280932369434b6280909dda6db6aef1",
+    "code": "COMPLETED",
+    "source": "live",
+    "turns": 6,
+    "usage": {
+      "inputTokens": 13445,
+      "outputTokens": 247
+    },
+    "usageComplete": true,
+    "evidence": [
+      "events.jsonl",
+      "discovery.json"
+    ],
+    "goal": {
+      "name": "get_member_savings_balance",
+      "description": "Retrieve the current savings balance for a specific member by member ID.",
+      "inputs": {
+        "member_id": {
+          "value": "12345",
+          "description": "The unique identifier for the member whose savings balance is requested."
+        }
+      },
+      "outputs": {
+        "savings_balance": {
+          "parser": "usd_cents",
+          "description": "The current savings balance for the specified member.",
+          "sensitive": true
+        }
+      }
+    },
+    "outputs": {
+      "savings_balance": 123456
+    }
+  },
+  "compiled": {
+    "draft": {
+      "appId": "harbor_core",
+      "appVersion": "1.0",
+      "name": "get_member_savings_balance",
+      "version": 1
+    },
+    "verified": {
+      "appId": "harbor_core",
+      "appVersion": "1.0",
+      "name": "get_member_savings_balance",
+      "version": 2
+    },
+    "verificationRuns": [
+      "run_af2305241a6748a39ae42b6eb53a7028",
+      "run_e7257460a320493699cfbcb732a71694"
+    ]
+  }
+}

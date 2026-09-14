@@ -1,0 +1,25 @@
+{
+  "agentRunId": "agent_98bf9589cf294466a946ebd0a24fba5c",
+  "source": "live",
+  "routing": {
+    "decision": "unsupported",
+    "modelId": "gpt-4.1-2025-04-14",
+    "responseId": "resp_017bbc5a15e22310016aa761e2b38487d1994252ccfcbcb9f0",
+    "usage": {
+      "inputTokens": 781,
+      "outputTokens": 16
+    },
+    "catalog": [
+      {
+        "name": "get_member_checking_balance",
+        "version": 2
+      },
+      {
+        "name": "get_member_savings_balance",
+        "version": 2
+      }
+    ]
+  },
+  "kind": "UNSUPPORTED_GOAL",
+  "reason": "changes_data"
+}

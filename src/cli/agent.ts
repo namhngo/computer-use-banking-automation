@@ -75,7 +75,7 @@ try {
     }
     return Object.fromEntries(trimmed.split(',').map((part, position) => {
       const equals = part.indexOf('=');
-      const [name, value] = equals === -1 ? [`_${String(index)}_${String(position)}`, part.trim()] : [part.slice(0, equals).trim(), part.slice(equals + 1).trim()];
+      const [name, value] = equals === -1 ? [`value${String(index)}x${String(position)}`, part.trim()] : [part.slice(0, equals).trim(), part.slice(equals + 1).trim()];
       if (!value || !/^[a-z][a-zA-Z0-9_]{0,63}$/.test(name)) throw new Error();
       return [name, value];
     }));

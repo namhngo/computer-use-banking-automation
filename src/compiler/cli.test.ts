@@ -14,7 +14,7 @@ let successRun: string;
 let notFoundRun: string;
 
 async function stage(name: string): Promise<string> {
-  const source = join(workspace, 'evidence', 'discovery-phase4', name, 'discovery.json');
+  const source = join(workspace, 'evidence', 'agent', name, 'discovery', 'discovery.json');
   const { runId } = transcriptSchema.parse(JSON.parse(await readFile(source, 'utf8')));
   await mkdir(join(root, 'runs', runId), { recursive: true });
   await copyFile(source, join(root, 'runs', runId, 'discovery.json'));
@@ -23,8 +23,8 @@ async function stage(name: string): Promise<string> {
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'compile-cli-'));
-  successRun = await stage('success');
-  notFoundRun = await stage('not-found');
+  successRun = await stage('cold-savings');
+  notFoundRun = await stage('cold-not-found');
 });
 afterEach(() => rm(root, { recursive: true, force: true }));
 
@@ -51,7 +51,7 @@ it('compiles the published live transcript into an immutable draft revision with
   expect(result).toEqual({ kind: 'COMPILED', draft: { appId: 'harbor_core', appVersion: '1.0', name: 'get_member_savings_balance', version: 1 } });
   const saved = await new FileCapabilityRegistry(join(root, 'capabilities')).load(result.draft);
   expect(saved).toMatchObject({ identity: { status: 'draft', version: 1 }, provenance: { source: 'discovered', runId: successRun },
-    outcomes: [{ code: 'MEMBER_NOT_FOUND', provenance: { source: 'observed', runId: notFoundRun } }] });
+    outcomes: [{ code: 'NO_MEMBER_FOUND', provenance: { source: 'observed', runId: notFoundRun } }] });
   expect(await run(['--run', successRun])).toMatchObject({ status: 1, result: { kind: 'FAILURE', code: 'REGISTRY_ERROR' } });
   expect(await run(['--run', successRun, '--version', '2'])).toMatchObject({ status: 0, result: { kind: 'COMPILED', draft: { version: 2 } } });
   expect((await readdir(join(root, 'capabilities'))).sort()).toEqual([
@@ -66,12 +66,12 @@ it('reports compile refusals by code and unreadable transcripts without echoing 
 }, 30_000);
 
 it.each([
-  [], ['--run', 'not-a-run-id'], ['--run', '../evidence/discovery-phase4/success'],
+  [], ['--run', 'not-a-run-id'], ['--run', '../evidence/agent/cold-savings'],
   ['--run', `run_${'0'.repeat(32)}`, '--run', `run_${'1'.repeat(32)}`],
   ['--run', `run_${'0'.repeat(32)}`, '--version', '0'], ['--run', `run_${'0'.repeat(32)}`, '--version', '1.5'],
   ['--run', `run_${'0'.repeat(32)}`, '--verify'], ['--run', `run_${'0'.repeat(32)}`, '--sandbox'],
-  ['--run', `run_${'0'.repeat(32)}`, '--verify', '--sandbox', '--verify-inputs', '{"memberId":"12345"}'],
-  ['--run', `run_${'0'.repeat(32)}`, '--verify-inputs', '{"memberId":"12345"}', '--verify-inputs', '{"memberId":"67890"}'],
+  ['--run', `run_${'0'.repeat(32)}`, '--verify', '--sandbox', '--verify-inputs', '{"member_id":"12345"}'],
+  ['--run', `run_${'0'.repeat(32)}`, '--verify-inputs', '{"member_id":"12345"}', '--verify-inputs', '{"member_id":"67890"}'],
   ['--run', `run_${'0'.repeat(32)}`, '--verify', '--sandbox', '--verify-inputs', '[]', '--verify-inputs', '{}'],
   ['--run', `run_${'0'.repeat(32)}`, '--unknown'], ['--run', `run_${'0'.repeat(32)}`, 'positional'],
 ])('rejects malformed invocations %j', async (...args) => {

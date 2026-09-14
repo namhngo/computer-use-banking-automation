@@ -40,6 +40,32 @@ export const intentSchema = z.strictObject({
 }).refine((intent) => (intent.status === 'ready') === (intent.goal !== null));
 export type DiscoveryIntent = z.infer<typeof intentSchema>;
 
+/**
+ * The same contract as the model's tool sees it. Provider function schemas enforce arrays of
+ * objects strictly but treat keyed records loosely, so names travel as array items and are
+ * folded into the GoalSpec records afterwards (duplicate names are refused).
+ */
+export const intentToolSchema = z.strictObject({
+  status: z.enum(['ready', 'clarify', 'unsupported']),
+  goal: z.strictObject({
+    name: identifierSchema,
+    description,
+    inputs: z.array(z.strictObject({ name: identifierSchema, value: z.string().min(1).max(200), description })).max(4),
+    outputs: z.array(z.strictObject({ name: identifierSchema, parser: extractionParserSchema, description, sensitive: z.boolean() })).min(1).max(8),
+  }).nullable(),
+});
+export function intentFromTool(input: unknown): DiscoveryIntent {
+  const parsed = intentToolSchema.parse(input);
+  if (parsed.goal === null) return intentSchema.parse({ status: parsed.status, goal: null });
+  const names = [...parsed.goal.inputs, ...parsed.goal.outputs].map((item) => item.name);
+  if (new Set(names).size !== names.length) throw new Error('Invalid discovery intent.');
+  return intentSchema.parse({ status: parsed.status, goal: {
+    name: parsed.goal.name, description: parsed.goal.description,
+    inputs: Object.fromEntries(parsed.goal.inputs.map(({ name, ...input }) => [name, input])),
+    outputs: Object.fromEntries(parsed.goal.outputs.map(({ name, ...output }) => [name, output])),
+  } });
+}
+
 /** Tool schemas are built per run so the model can only name inputs and outputs it declared. */
 export function toolInputSchemas(spec: GoalSpec) {
   const inputNames = Object.keys(spec.inputs);
