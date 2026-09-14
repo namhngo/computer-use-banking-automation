@@ -11,8 +11,7 @@ import { compileTranscript, CompileError } from '../compiler/compile.js';
 import { verifyDraft, type VerificationAttempt } from '../compiler/verify.js';
 import { readConfig } from '../config.js';
 import { readTranscriptFile } from '../discovery/transcript.js';
-import { loadPolicy, parsePolicy } from '../policy/policy.js';
-import { harborApp } from '../surface/harbor-profile.js';
+import { loadPolicy, parsePolicy, policyApp } from '../policy/policy.js';
 
 type CompileCliResult =
   | { kind: 'COMPILED'; draft: CapabilityKey }
@@ -71,9 +70,11 @@ try {
     ...verifyInputs.flatMap((input) => Object.values(input as Record<string, unknown>).map(String))];
   const registry = new FileCapabilityRegistry(values.registry);
 
+  const basePolicy = await loadPolicy(values.policy);
+
   setupCode = 'COMPILE_FAILED';
   const draft = compileTranscript(transcript, {
-    name: values.name, version, app: harborApp, recordedAt: new Date().toISOString(), outcomeTranscripts, sensitiveValues,
+    name: values.name, version, app: policyApp(basePolicy), recordedAt: new Date().toISOString(), outcomeTranscripts, sensitiveValues,
   });
 
   if (!values.verify) {
@@ -81,7 +82,6 @@ try {
     result = { kind: 'COMPILED', draft: await registry.save(draft, sensitiveValues) };
   } else {
     setupCode = 'VERIFY_FAILED';
-    const basePolicy = await loadPolicy(values.policy);
     const report = await verifyDraft({
       draft, registry, inputs: verifyInputs as Record<string, string>[], credentials, verifiedAt: new Date().toISOString(),
       evidenceRoot: values['evidence-root'], headless: config.headless,

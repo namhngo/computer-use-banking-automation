@@ -9,7 +9,7 @@ const eventSchema = z.strictObject({
   phase: identifier.optional(),
   stepId: identifier.optional(),
   action: identifier.optional(),
-  targetKey: identifier.optional(),
+  effect: identifier.optional(),
   strategyIndex: z.int().nonnegative().optional(),
   code: identifier.optional(),
   attempt: z.int().positive().optional(),
@@ -47,10 +47,12 @@ const roleSchema = z.enum([
   'term', 'textbox', 'time', 'timer', 'toolbar', 'tooltip', 'tree', 'treegrid',
   'treeitem', 'other',
 ]);
-export const evidencePathSchema = z.enum([
-  '/', '/login', '/members/search', '/members/:memberId',
-  '/members/:memberId/accounts', '/notice', '[blocked]', '[unavailable]',
-]);
+/**
+ * Canonical page path: identifiers are spelled `:id`, never a real value. A segment made only of
+ * digits is refused here as a last line of defence; unknown routes arrive as `[unavailable]`.
+ */
+export const evidencePathSchema = z.string().max(250)
+  .regex(/^(?:\/|(?:\/(?:(?![0-9]+(?:\/|$))[A-Za-z0-9_-]+|:id))+|\[blocked\]|\[unavailable\])$/);
 const pathSchema = evidencePathSchema;
 const snapshotSchema = z.strictObject({
   frames: z.array(z.strictObject({
@@ -83,7 +85,7 @@ const interventionSchema = z.strictObject({
   operatorId: identifier.optional(),
   transitions: z.array(z.strictObject({ state: interventionStateSchema, at: timestamp, code: identifier.optional() })).max(40),
   humanActions: z.array(z.strictObject({
-    action: identifier, targetKey: identifier.optional(), outcome: identifier, path: pathSchema, at: timestamp,
+    action: identifier, effect: identifier, outcome: identifier, path: pathSchema, at: timestamp,
   })).max(200),
 });
 export type InterventionRecord = z.infer<typeof interventionSchema>;
@@ -116,8 +118,29 @@ export class EvidenceSink {
   private constructor(
     readonly directory: string,
     private readonly runId: string,
-    private readonly sensitivePattern: RegExp | undefined,
+    private sensitivePattern: RegExp | undefined,
   ) {}
+
+  private static compilePattern(values: readonly string[]): RegExp | undefined {
+    const checked = z.array(z.string().max(4096)).max(100).parse(values);
+    if (checked.reduce((total, value) => total + value.length, 0) > 16384) throw new Error();
+    const variants = new Set<string>();
+    for (const value of checked) {
+      if (!value) continue;
+      const json = JSON.stringify(value).slice(1, -1);
+      const unicode = value.split('').map((char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+      for (const variant of [
+        value, json, JSON.stringify(json).slice(1, -1), json.replaceAll('/', '\\/'),
+        unicode, unicode.replace(/[a-f]/g, (char) => char.toUpperCase()),
+        encodeURIComponent(value), encodeURIComponent(encodeURIComponent(value)),
+      ]) variants.add(variant);
+    }
+    return variants.size === 0 ? undefined : new RegExp(
+      [...variants].sort((a, b) => b.length - a.length)
+        .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+      'g',
+    );
+  }
 
   static async create(options: {
     root?: string;
@@ -126,24 +149,7 @@ export class EvidenceSink {
   }): Promise<EvidenceSink> {
     try {
       const runId = z.string().max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/).parse(options.runId);
-      const values = z.array(z.string().max(4096)).max(100).parse(options.sensitiveValues ?? []);
-      if (values.reduce((total, value) => total + value.length, 0) > 16384) throw new Error();
-      const variants = new Set<string>();
-      for (const value of values) {
-        if (!value) continue;
-        const json = JSON.stringify(value).slice(1, -1);
-        const unicode = value.split('').map((char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
-        for (const variant of [
-          value, json, JSON.stringify(json).slice(1, -1), json.replaceAll('/', '\\/'),
-          unicode, unicode.replace(/[a-f]/g, (char) => char.toUpperCase()),
-          encodeURIComponent(value), encodeURIComponent(encodeURIComponent(value)),
-        ]) variants.add(variant);
-      }
-      const pattern = variants.size === 0 ? undefined : new RegExp(
-        [...variants].sort((a, b) => b.length - a.length)
-          .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
-        'g',
-      );
+      const pattern = EvidenceSink.compilePattern(options.sensitiveValues ?? []);
       const root = resolve(options.root ?? 'artifacts/runs');
       const directory = resolve(root, runId);
       await mkdir(root, { recursive: true, mode: 0o700 });
@@ -154,6 +160,14 @@ export class EvidenceSink {
       // Filesystem and validation errors can expose private paths or rejected input.
       throw new Error('Unable to create evidence.');
     }
+  }
+
+  /** Values learned after the sink was opened (e.g. the inputs a model declared) are redacted from then on. */
+  addSensitiveValues(values: readonly string[]): void {
+    const known = this.sensitivePattern?.source;
+    const added = EvidenceSink.compilePattern(values);
+    if (!added) return;
+    this.sensitivePattern = known ? new RegExp(`${added.source}|${known}`, 'g') : added;
   }
 
   get files(): string[] {

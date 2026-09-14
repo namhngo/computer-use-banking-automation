@@ -8,7 +8,7 @@ import { MockLanguageModelV4 } from 'ai/test';
 import { expect, it, vi } from 'vitest';
 import { createMockApp, type MockFault } from '../../mock-app/app.js';
 import { runDiscovery } from '../../src/discovery/engine.js';
-import { discoveryResultSchema, ModelCallError, transcriptSchema, type DiscoveryDecision, type DiscoveryIntent, type DiscoveryResult } from '../../src/discovery/contracts.js';
+import { discoveryResultSchema, ModelCallError, transcriptSchema, type DiscoveryDecision, type DiscoveryIntent, type DiscoveryResult, type GoalSpec } from '../../src/discovery/contracts.js';
 import { createDiscoveryModel, type DiscoveryModel } from '../../src/discovery/model.js';
 import { EvidenceSink } from '../../src/evidence/evidence.js';
 import { loadPolicy, parsePolicy } from '../../src/policy/policy.js';
@@ -19,35 +19,46 @@ const credentials = { username: 'discovery-synthetic-operator', password: 'disco
 const secret = 'synthetic-private-provider-key';
 const basePolicy = await loadPolicy(new URL('../../policy.yaml', import.meta.url).pathname);
 type Context = {
-  goal: string; inputs: { memberId: string };
+  goal: string; contract: GoalSpec;
   observation: { path: string; controls: Array<{
     ref: string; tag: string; label: string; text: string; href: string | null;
     scope: 'main' | 'frame'; row?: string; column?: string | number;
   }> };
   actions: Array<{ tool: string; status: string; code?: string }>;
-  extracted: Array<{ field: string; scope: string }>;
+  extracted: Array<{ name: string; kind: 'input' | 'output'; framePath: string }>;
 };
+/** The contract a model would declare for the savings goal. Only tests know this shape; production derives it per run. */
+const savingsSpec = (memberId: string): GoalSpec => ({
+  name: 'get_member_savings_balance', description: 'Read the savings balance and currency for a member.',
+  inputs: { memberId: { value: memberId, description: 'Member identifier.' } },
+  outputs: {
+    savingsBalanceCents: { parser: 'usd_cents', description: 'Savings balance in cents.', sensitive: true },
+    currency: { parser: 'text', description: 'Currency code.', sensitive: false },
+  },
+});
+const ready = (memberId = '12345'): DiscoveryIntent => ({ status: 'ready', goal: savingsSpec(memberId) });
 const human: DiscoveryDecision = { tool: 'request_human', input: { reason: 'ask_human', code: 'stuck' } };
-const complete: DiscoveryDecision = { tool: 'complete', input: { reason: 'confirm_completion', outcome: 'success', ref: null } };
+const complete: DiscoveryDecision = { tool: 'complete', input: { reason: 'confirm_completion', outcome: 'success', code: null, ref: null } };
 const wait: DiscoveryDecision = { tool: 'wait', input: { reason: 'wait_for_ui', ms: 50 } };
 const click = (ref: string): DiscoveryDecision => ({ tool: 'click', input: { ref, reason: 'locate_record' } });
 
 function fakeModel(choose: (context: Context, turn: number, signal: AbortSignal) => DiscoveryDecision | Promise<DiscoveryDecision>,
-  intent: DiscoveryIntent = { status: 'ready', memberId: '12345' }): DiscoveryModel {
+  intent: DiscoveryIntent = ready()): DiscoveryModel {
   let turn = 0;
   const reply = <T>(value: T) => ({ value, usage: { inputTokens: 10, outputTokens: 2 },
     modelId: 'actual-test-model', responseId: `test-response-${turn}` });
   return {
     source: 'test', provider: 'synthetic', modelId: 'configured-test-model', secretValues: [secret],
     intent: () => Promise.resolve(reply(intent)),
-    decide: async (input, signal) => {
+    decide: async (spec, input, signal) => {
       const serialized = JSON.stringify(input);
       for (const forbidden of [secret, credentials.username, credentials.password, '"target"', '"strategies"',
-        '"selector"', '"formValues"', '"targetKey"', 'member_identity', 'savings_balance']) {
+        '"selector"', '"formValues"', '"effect"', '"targetKey"']) {
         expect(serialized).not.toContain(forbidden);
       }
       const context = input as Context;
-      expect(context.goal).toContain(context.inputs.memberId);
+      expect(context.contract).toEqual(spec);
+      for (const declared of Object.values(context.contract.inputs)) expect(context.goal).toContain(declared.value);
       expect(context.actions.length).toBeLessThanOrEqual(5);
       return reply(await choose(context, ++turn, signal));
     },
@@ -60,8 +71,8 @@ function chooseRead(context: Context, reverse = false): DiscoveryDecision {
   const notice = controls.find((control) => control.tag === 'button' && control.text === 'OK');
   if (notice) return click(notice.ref);
   const alert = controls.find((control) => ['No member found', 'Member ID must be 5 digits'].includes(control.text));
-  if (alert) return { tool: 'complete', input: { reason: 'confirm_completion', ref: alert.ref,
-    outcome: alert.text === 'No member found' ? 'member_not_found' : 'invalid_member_id' } };
+  if (alert) return { tool: 'complete', input: { reason: 'confirm_completion', ref: alert.ref, outcome: 'business_outcome',
+    code: alert.text === 'No member found' ? 'MEMBER_NOT_FOUND' : 'INVALID_MEMBER_ID' } };
   const member = controls.find((control) => control.tag === 'a' && control.text === 'View member');
   if (member) return click(member.ref);
   const input = controls.find((control) => control.tag === 'input' && control.label === 'Member ID');
@@ -71,15 +82,17 @@ function chooseRead(context: Context, reverse = false): DiscoveryDecision {
     }
     return click(controls.find((control) => control.tag === 'button' && control.text === 'Search')!.ref);
   }
+  const memberId = context.contract.inputs.memberId!.value;
+  const outputNames = Object.keys(context.contract.outputs);
   const fields = [
-    { field: 'memberId', scope: 'main', control: controls.find((control) => control.scope === 'main' && control.row === 'Member ID') },
-    { field: 'memberId', scope: 'frame', control: controls.find((control) => control.scope === 'frame' && control.tag === 'strong' && control.text === context.inputs.memberId) },
-    { field: 'savingsBalanceCents', scope: 'frame', control: controls.find((control) => control.row === 'Savings' && control.column === 'Current balance') },
-    { field: 'currency', scope: 'frame', control: controls.find((control) => control.row === 'Savings' && control.column === 'Currency') },
-  ] as const;
+    { name: 'memberId', frame: false, control: controls.find((control) => control.scope === 'main' && control.row === 'Member ID') },
+    { name: 'memberId', frame: true, control: controls.find((control) => control.scope === 'frame' && control.tag === 'strong' && control.text === memberId) },
+    ...outputNames.map((name) => ({ name, frame: true, control: controls.find((control) =>
+      control.row === (name.startsWith('checking') ? 'Checking' : 'Savings') && control.column === (name === 'currency' ? 'Currency' : 'Current balance')) })),
+  ];
   for (const next of reverse ? [...fields].reverse() : fields) {
-    if (!context.extracted.some((read) => read.field === next.field && read.scope === next.scope)) {
-      return next.control ? { tool: 'extract', input: { ref: next.control.ref, field: next.field, reason: 'read_value' } } : wait;
+    if (!context.extracted.some((read) => read.name === next.name && read.framePath.endsWith('/accounts') === next.frame)) {
+      return next.control ? { tool: 'extract', input: { ref: next.control.ref, name: next.name, reason: 'read_value' } } : wait;
     }
   }
   return complete;
@@ -96,7 +109,7 @@ it('connects the real SDK tool parser to the real browser with an explicitly tes
         const text = message.content.find((entry) => entry.type === 'text');
         if (!text || text.type !== 'text') throw new Error('Expected text context');
         const intent = options.toolChoice?.type === 'tool' && options.toolChoice.toolName === 'plan_goal';
-        const choice = intent ? { tool: 'plan_goal', input: { status: 'ready', memberId: '12345' } }
+        const choice = intent ? { tool: 'plan_goal', input: ready() }
           : chooseRead(JSON.parse(text.text) as Context);
         sequence++;
         return Promise.resolve({
@@ -167,7 +180,7 @@ it.each([
   ['12345', 123456, '$1,234.56', false], ['67890', 987654, '$9,876.54', true],
 ] as const)('reads %s from selected live fields in varying order, with private test evidence', async (id, cents, amount, reverse) => {
   await withApp(async ({ run, transcript, root }) => {
-    const result = await run(fakeModel((context) => chooseRead(context, reverse), { status: 'ready', memberId: id }),
+    const result = await run(fakeModel((context) => chooseRead(context, reverse), ready(id)),
       { goal: `Read savings balance and currency for member ${id}.` });
     expect(result).toMatchObject({ kind: 'SUCCESS', source: 'test', usageComplete: true, outputs: { savingsBalanceCents: cents, currency: 'USD' } });
     const trace = await transcript(result);
@@ -176,12 +189,13 @@ it.each([
     expect(trace.calls.every((call) => call.status === 'returned' && call.usage !== null
       && call.modelId === 'actual-test-model' && call.responseId?.startsWith('test-response-'))).toBe(true);
     expect(result.usage.inputTokens).toBe(trace.calls.length * 10);
-    expect(trace.records.filter((record) => record.tool === 'extract').map((record) => record.field)).toEqual(
+    expect(trace.goal).toEqual({ ...savingsSpec(id), inputs: { memberId: { description: 'Member identifier.', format: 'digits', length: 5 } } });
+    expect(trace.records.filter((record) => record.tool === 'extract').map((record) => record.name)).toEqual(
       reverse ? ['currency', 'savingsBalanceCents', 'memberId', 'memberId'] : ['memberId', 'memberId', 'savingsBalanceCents', 'currency']);
     expect(trace.records.find((record) => record.tool === 'fill')?.value).toEqual({ source: 'input', name: 'memberId' });
     for (const filename of await readdir(join(root, result.runId))) {
       const content = await readFile(join(root, result.runId, filename), 'utf8');
-      for (const privateValue of [id, String(cents), amount, credentials.username, credentials.password, secret, 'Read savings balance', '"outputs"']) {
+      for (const privateValue of [id, String(cents), amount, credentials.username, credentials.password, secret, 'Read savings balance']) {
         expect(content).not.toContain(privateValue);
       }
     }
@@ -203,22 +217,65 @@ it('rejects premature completion, then lets fresh model choices supply the evide
   });
 });
 
-it('requires the sole standalone goal ID to match intent, before creating any UI', async () => {
+it('requires every declared input to be written in the goal, before creating any UI', async () => {
   await withApp(async ({ run, adapters, transcript }) => {
-    for (const goal of ['Read savings balance.', 'Read savings for 12345 and 67890.', 'Read savings for 67890.',
-      'Read savings for x12345y.', `Read savings for ${Array.from({ length: 110 }, (_, index) => 10000 + index).join(' ')}.`]) {
+    for (const goal of ['Read savings balance.', 'Read savings for 67890.',
+      `Read savings for ${Array.from({ length: 110 }, (_, index) => 10000 + index).join(' ')}.`]) {
       const result = await run(fakeModel(() => human), { goal });
       expect(result.kind).toBe('CLARIFICATION_REQUIRED');
       expect((await transcript(result)).records).toEqual([]);
     }
-    expect(adapters).toHaveLength(0);
+    // A capability name that embeds the identifier would leak it into every artifact and evidence file.
+    const leaky = await run(fakeModel(() => human), { goal: 'Read savings for 12345.' });
+    expect(leaky.kind).toBe('BLOCKED');
+    const named = await run(fakeModel(() => human, { status: 'ready', goal: { ...savingsSpec('12345'), name: 'get_member_12345_savings' } }));
+    expect(named).toMatchObject({ kind: 'FAILURE', code: 'MODEL_ERROR' });
+    expect(adapters).toHaveLength(1);
+  });
+});
+
+it('discovers a different read on the same application from the same loop, with no new code', async () => {
+  await withApp(async ({ run, transcript }) => {
+    const checking: GoalSpec = {
+      name: 'get_member_checking_balance', description: 'Read the checking balance for a member.',
+      inputs: { memberId: { value: '67890', description: 'Member identifier.' } },
+      outputs: { checkingBalanceCents: { parser: 'usd_cents', description: 'Checking balance in cents.', sensitive: true } },
+    };
+    const result = await run(fakeModel((context) => chooseRead(context), { status: 'ready', goal: checking }),
+      { goal: 'What is the checking balance for member 67890?' });
+    expect(result).toMatchObject({ kind: 'SUCCESS', outputs: { checkingBalanceCents: 8000 }, goal: checking });
+    const trace = await transcript(result);
+    expect(trace.goal?.name).toBe('get_member_checking_balance');
+    expect(trace.records.filter((record) => record.tool === 'extract').map((record) => record.name)).toEqual(['memberId', 'memberId', 'checkingBalanceCents']);
+  });
+});
+
+it('refuses outputs read from a document that does not display the requested identity', async () => {
+  await withApp(async ({ run, adapters, transcript, count }) => {
+    const result = await run(fakeModel(async (context, turn) => {
+      if (context.actions.some((action) => action.code === 'WRONG_IDENTITY')) return human;
+      if (turn > 1 && context.observation.path === '/members/12345' && !context.actions.some((action) => action.tool === 'wait')) {
+        // Someone swaps the accounts frame to another member's record after the model arrived.
+        await adapters[0]!.page.locator('iframe[title="Member accounts"]').evaluate((element) => { element.setAttribute('src', '/members/67890/accounts'); });
+        await adapters[0]!.page.frameLocator('iframe[title="Member accounts"]').getByText('$9,876.54', { exact: true }).waitFor();
+        return wait;
+      }
+      // A model that reads the frame's identity as "the member" gets told, precisely, that it is not.
+      const strong = context.observation.controls.find((control) => control.scope === 'frame' && control.tag === 'strong');
+      if (strong && context.actions.some((action) => action.tool === 'wait')) return { tool: 'extract', input: { ref: strong.ref, name: 'memberId', reason: 'read_value' } };
+      return chooseRead(context);
+    }));
+    expect(result).toMatchObject({ kind: 'BLOCKED', code: 'HUMAN_REQUIRED' });
+    expect(result.outputs).toBeUndefined();
+    expect((await transcript(result)).records.some((record) => record.tool === 'extract' && record.code === 'WRONG_IDENTITY')).toBe(true);
+    expect(count('POST', '/members/search')).toBe(1);
   });
 });
 
 it('honors unsupported and clarification intent without a browser, and rejects secret goals before SDK calls', async () => {
   await withApp(async ({ run, adapters }) => {
     for (const status of ['unsupported', 'clarify'] as const) {
-      const result = await run(fakeModel(() => human, { status, memberId: null }));
+      const result = await run(fakeModel(() => human, { status, goal: null }));
       expect(result.kind).toBe(status === 'unsupported' ? 'UNSUPPORTED_GOAL' : 'CLARIFICATION_REQUIRED');
     }
     const model = fakeModel(() => human);
@@ -261,14 +318,24 @@ it('blocks dangerous model-selected clicks before any servicing POST', async () 
   });
 });
 
-it('checks the actual submitted member before Search, without submitting an empty or different ID', async () => {
+it('accepts a business outcome only when the declared inputs were actually submitted', async () => {
   await withApp(async ({ run, count, transcript, adapters }) => {
-    const result = await run(fakeModel((context) => click(context.observation.controls.find((control) => control.text === 'Search')!.ref)));
-    expect(result).toMatchObject({ kind: 'BLOCKED', code: 'DEAD_END' });
-    expect(count('POST', '/members/search')).toBe(0);
+    // The page arrives with another identifier already typed. Submitting it is a permitted read, but the
+    // "No member found" it produces is not an outcome for the requested member, so the claim is refused.
+    const result = await run(fakeModel(async (context) => {
+      const alert = context.observation.controls.find((control) => control.text === 'No member found');
+      if (alert) return { tool: 'complete', input: { reason: 'confirm_completion', ref: alert.ref, outcome: 'business_outcome', code: 'MEMBER_NOT_FOUND' } };
+      await adapters[0]!.page.getByLabel('Member ID', { exact: true }).evaluate((input) => { (input as HTMLInputElement).value = '99999'; });
+      return click(context.observation.controls.find((control) => control.text === 'Search')!.ref);
+    }));
+    expect(['BLOCKED', 'FAILURE']).toContain(result.kind);
+    expect(result.outputs).toBeUndefined();
     const records = (await transcript(result)).records;
-    expect(records).toHaveLength(3);
-    expect(records.slice(0, 2).every((record) => record.code === 'WRONG_MEMBER')).toBe(true);
+    const claims = records.filter((record) => record.tool === 'complete');
+    expect(claims.length).toBeGreaterThan(1);
+    expect(claims.filter((record) => record.status === 'rejected').every((record) => record.code === 'INCOMPLETE_EVIDENCE')).toBe(true);
+    expect(claims.some((record) => record.status === 'succeeded')).toBe(false);
+    expect(count('POST', '/members/search')).toBe(1);
     const duplicate = await run(fakeModel(async (context, turn) => {
       if (turn === 2) {
         await adapters.at(-1)!.page.getByRole('button', { name: 'Search', exact: true }).evaluate((button) => {
@@ -281,7 +348,7 @@ it('checks the actual submitted member before Search, without submitting an empt
     }));
     expect(duplicate.kind).not.toBe('SUCCESS');
     expect((await transcript(duplicate)).records.some((record) => record.code === 'CAPTURE_FAILED')).toBe(true);
-    expect(count('POST', '/members/search')).toBe(0);
+    expect(count('POST', '/members/search')).toBe(1);
   });
 });
 
@@ -308,7 +375,7 @@ it('enforces token, step, repeated-state and runtime option bounds', async () =>
   await withApp(async ({ run, adapters, transcript }) => {
     expect(await run(fakeModel(() => human), { limits: { maxTokens: 12 } })).toMatchObject({ code: 'TOKEN_LIMIT', turns: 0 });
     for (const status of ['clarify', 'unsupported'] as const) {
-      const stopped = await run(fakeModel(() => human, { status, memberId: null }), { limits: { maxTokens: 11 } });
+      const stopped = await run(fakeModel(() => human, { status, goal: null }), { limits: { maxTokens: 11 } });
       expect(stopped).toMatchObject({ code: 'TOKEN_LIMIT', usageComplete: true, usage: { inputTokens: 10, outputTokens: 2 } });
       expect((await transcript(stopped)).calls[0]?.status).toBe('returned');
     }
@@ -342,7 +409,7 @@ it('aborts SDK deadlines, ignores late model choices, and closes a late-created 
     pendingIntent.intent = async (_goal, signal) => {
       await delay(100);
       expect(signal.aborted).toBe(true);
-      return { value: { status: 'ready', memberId: '12345' }, usage: { inputTokens: 10, outputTokens: 2 }, modelId: 'actual-test-model' };
+      return { value: ready(), usage: { inputTokens: 10, outputTokens: 2 }, modelId: 'actual-test-model' };
     };
     expect(await run(pendingIntent, { limits: { maxDurationMs: 40 } })).toMatchObject({ code: 'RUN_TIMEOUT', turns: 0 });
     await delay(120);
@@ -365,13 +432,13 @@ it('aborts SDK deadlines, ignores late model choices, and closes a late-created 
 it('retains accounted usage on malformed replies and sanitizes client exceptions', async () => {
   await withApp(async ({ run, transcript }) => {
     const metadata = fakeModel(() => human);
-    metadata.intent = () => Promise.resolve({ value: { status: 'ready', memberId: '12345' }, usage: { inputTokens: 7, outputTokens: 3 }, modelId: '' });
+    metadata.intent = () => Promise.resolve({ value: ready(), usage: { inputTokens: 7, outputTokens: 3 }, modelId: '' });
     const invalidMetadata = await run(metadata);
     expect(invalidMetadata).toMatchObject({ code: 'MODEL_ERROR', usageComplete: true, usage: { inputTokens: 7, outputTokens: 3 } });
     expect((await transcript(invalidMetadata)).calls[0]).toEqual({ turn: 0, phase: 'intent',
       status: 'failed', usage: { inputTokens: 7, outputTokens: 3 }, modelId: 'configured-test-model' });
     const malformed = fakeModel(() => human);
-    malformed.intent = () => Promise.resolve({ value: { status: 'ready', memberId: '12345' }, modelId: 'actual-test-model' }) as never;
+    malformed.intent = () => Promise.resolve({ value: ready(), modelId: 'actual-test-model' }) as never;
     const missingUsage = await run(malformed);
     expect(missingUsage).toMatchObject({ code: 'MODEL_ERROR', usageComplete: false });
     expect((await transcript(missingUsage)).calls[0]).toMatchObject({ status: 'failed', usage: null });
@@ -502,7 +569,7 @@ it('rejects completion if the UI changes after either identity was verified', as
           let identities = 0;
           adapter.act = async (...args) => {
             const value = await act(...args);
-            if (args[1] === 'extract' && value === context.inputs.memberId && ++identities === afterIdentity) {
+            if (args[1] === 'extract' && value === context.contract.inputs.memberId!.value && ++identities === afterIdentity) {
               await adapter.page.frameLocator('iframe').locator('body').evaluate((body) => {
                 body.querySelector('strong')!.textContent = '67890';
                 body.querySelector('td.amount')!.textContent = '$9,876.54';
@@ -544,7 +611,7 @@ it('checks terminal health after logging and preserves receipts when post-dispat
         const record = (await transcript(result)).records.at(-1);
         expect(record?.status).toBe('succeeded');
         if (fault === 'evidence') {
-          expect(record).toMatchObject({ tool: 'click', targetKey: 'search_member', path: '/members/search', framePath: '/members/search' });
+          expect(record).toMatchObject({ tool: 'click', effect: 'submit', path: '/members/search', framePath: '/members/search' });
           expect(record?.target).toBeDefined();
           expect(count('GET', '/members/12345')).toBe(0);
         }

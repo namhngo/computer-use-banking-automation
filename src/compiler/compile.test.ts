@@ -87,28 +87,39 @@ describe('compileTranscript refuses what the transcript does not prove', () => {
     failsWith('COMPILE_NOT_SUCCESSFUL', mutate((copy) => { copy.status = 'BLOCKED'; }));
   });
 
+  it('derives the capability contract from the declared goal, not from a registry', () => {
+    const artifact = compile(success);
+    expect(Object.keys(artifact.inputs)).toEqual(['memberId']);
+    expect(artifact.inputs.memberId).toMatchObject({ type: 'string', format: 'digits', minLength: 5, maxLength: 5, sensitive: true });
+    expect(artifact.outputs.savingsBalanceCents).toMatchObject({ type: 'number', integer: true, sensitive: true });
+    expect(artifact.outputs.currency).toMatchObject({ type: 'string', sensitive: false });
+    expect(artifact.identity.description).toContain(success.goal!.description);
+    failsWith('COMPILE_NOT_SUCCESSFUL', { ...success, goal: null, records: [], status: 'CLARIFICATION_REQUIRED' });
+    failsWith('COMPILE_HUMAN_ASSISTED', mutate((copy) => { copy.records[1]!.code = 'HUMAN_RESUMED'; }));
+  });
+
   it('rejects flows without identity evidence, outputs, or a bound input', () => {
-    failsWith('COMPILE_NO_IDENTITY_CHECK', mutate((copy) => { copy.records = copy.records.filter((record) => record.field !== 'memberId'); }));
-    failsWith('COMPILE_MISSING_OUTPUT', mutate((copy) => { copy.records = copy.records.filter((record) => record.field !== 'currency'); }));
+    failsWith('COMPILE_NO_IDENTITY_CHECK', mutate((copy) => { copy.records = copy.records.filter((record) => record.name !== 'memberId'); }));
+    failsWith('COMPILE_MISSING_OUTPUT', mutate((copy) => { copy.records = copy.records.filter((record) => record.name !== 'currency'); }));
     failsWith('COMPILE_UNBOUND_FILL', mutate((copy) => {
       const fill = copy.records.find((record) => record.tool === 'fill')!;
       fill.value = { source: 'literal', value: 'anything' };
     }));
-    failsWith('COMPILE_NO_DISPATCHES', mutate((copy) => { copy.records = copy.records.map((record) => ({ ...record, status: 'rejected', target: undefined, targetKey: undefined, path: undefined, framePath: undefined, value: undefined, field: undefined })); }));
+    failsWith('COMPILE_NO_DISPATCHES', mutate((copy) => { copy.records = copy.records.map((record) => ({ ...record, status: 'rejected', target: undefined, effect: undefined, path: undefined, framePath: undefined, value: undefined, name: undefined })); }));
   });
 
   it('does not invent a postcondition for a click with no observed consequence', () => {
     failsWith('COMPILE_AMBIGUOUS_EFFECT', mutate((copy) => {
       const last = copy.records.findLastIndex((record) => record.status === 'succeeded' && record.tool !== 'complete');
       copy.records = [...copy.records.slice(0, last + 1), { turn: 49, tool: 'click', reason: 'inspect_state', status: 'succeeded',
-        target: { strategies: [{ kind: 'text', text: { source: 'literal', value: 'Anything' } }] }, path: '/members/:memberId', framePath: '/members/:memberId' }];
+        target: { strategies: [{ kind: 'text', text: { source: 'literal', value: 'Anything' } }] }, path: '/members/:id', framePath: '/members/:id' }];
     }));
   });
 
   it('rejects parameterized entry paths, unknown fields, and known sensitive literals', () => {
-    failsWith('COMPILE_AMBIGUOUS_ENTRY', mutate((copy) => { copy.records[0]!.path = '/members/:memberId'; }));
+    failsWith('COMPILE_AMBIGUOUS_ENTRY', mutate((copy) => { copy.records[0]!.path = '/members/:id'; }));
     failsWith('COMPILE_AMBIGUOUS_ENTRY', mutate((copy) => {
-      copy.records.splice(1, 0, { turn: 40, tool: 'navigate', reason: 'locate_record', status: 'succeeded', path: '/members/:memberId' });
+      copy.records.splice(1, 0, { turn: 40, tool: 'navigate', reason: 'locate_record', status: 'succeeded', path: '/members/:id' });
     }));
     failsWith('COMPILE_SENSITIVE_LITERAL', mutate((copy) => {
       const search = copy.records.find((record) => record.tool === 'click')!;
@@ -120,12 +131,14 @@ describe('compileTranscript refuses what the transcript does not prove', () => {
     failsWith('COMPILE_INVALID_OUTCOME', success, { outcomeTranscripts: [success] });
     failsWith('COMPILE_INVALID_OUTCOME', success, { outcomeTranscripts: [{ ...notFound, records: notFound.records.map((record) => ({ ...record, outcome: undefined })) }] });
     failsWith('COMPILE_INVALID_OUTCOME', success, { outcomeTranscripts: [notFound, notFound] });
+    // A different contract (other outputs, other name) is not an outcome of this capability, however it ended.
+    failsWith('COMPILE_INVALID_OUTCOME', success, { outcomeTranscripts: [{ ...notFound, goal: { ...notFound.goal!, name: 'get_member_checking_balance' } }] });
     failsWith('COMPILE_INVALID_TRANSCRIPT', success, { outcomeTranscripts: ['not a transcript'] });
   });
 
   it('keeps only the last confirmed read of a re-extracted output', () => {
     const artifact = compile(mutate((copy) => {
-      const currency = copy.records.find((record) => record.field === 'currency')!;
+      const currency = copy.records.find((record) => record.name === 'currency')!;
       copy.records.splice(copy.records.indexOf(currency), 0, { ...currency, turn: 4 });
       copy.records.forEach((record, index) => { record.turn = index + 1; });
     }));

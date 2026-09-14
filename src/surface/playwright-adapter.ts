@@ -5,16 +5,16 @@ import { bindText } from '../artifact/bindings.js';
 import { targetSchema } from '../artifact/schema.js';
 import type { Condition, Target } from '../artifact/schema.js';
 import type { SafeSnapshot } from '../evidence/evidence.js';
-import { authorizeAction, authorizeHumanAction, authorizeRequest } from '../policy/policy.js';
-import type { Policy } from '../policy/policy.js';
+import { authorizeAction, authorizeHumanAction, authorizeRequest, canonicalPagePath, policyApp } from '../policy/policy.js';
+import type { Effect, Policy } from '../policy/policy.js';
+import { classifyEffect, elementSignature } from './effects.js';
 import { SurfaceError } from './errors.js';
-import { classifyHarborTarget, elementSignature, harborApp } from './harbor-profile.js';
 import { startPolicyProxy } from './network.js';
 
 type Inputs = Record<string, string | number | boolean>;
 type Selector = NonNullable<Target['scope']>['frames'][number];
 type Control = { handle: ElementHandle<Element>; frame: Frame; signature: string; epoch: number; strategyIndex: number; target: Target; inputs: Inputs };
-export type SurfaceEvent = { type: string; action?: string; targetKey?: string; strategyIndex?: number; code?: string };
+export type SurfaceEvent = { type: string; action?: string; effect?: Effect['kind']; strategyIndex?: number; code?: string };
 export type Observation = {
   generation: number; path: string; truncated: boolean;
   controls: Array<{ ref: string; tag: string; label: string; text: string; target: Target;
@@ -22,20 +22,12 @@ export type Observation = {
     options: Array<{ label: string; value: string; disabled: boolean }> }>;
 };
 export type CapturedControl = {
-  target: Target; targetKey: string | null; framePath: string; role: string | null;
+  target: Target; effect: Effect; framePath: string; role: string | null;
   /** Private validation data. Never send to the model or persist in a transcript. */
   formValues: Record<string, string>;
 };
 /** Sanitized record of one operator action in the handed-over browser. No values, no URLs. */
-export type HumanAction = { action: 'click' | 'submit'; targetKey?: string; outcome: 'recorded' | 'allowed' | 'blocked'; path: string };
-
-const knownPaths = ['/', '/login', '/members/search', '/members/:memberId', '/members/:memberId/accounts', '/notice'];
-export function canonicalPath(url: string): string {
-  const parsed = URL.parse(url);
-  if (!parsed) return '[unavailable]';
-  const path = parsed.pathname.replace(/\/[0-9]{5}(?=\/|$)/g, '/:memberId');
-  return knownPaths.includes(path) ? path : '[unavailable]';
-}
+export type HumanAction = { action: 'click' | 'submit'; effect: Effect['kind']; outcome: 'recorded' | 'allowed' | 'blocked'; path: string };
 
 // Installed in every document. Idle until the adapter reports human control, so automation's
 // own DOM dispatch is untouched. Submissions are held until the trusted side classifies and
@@ -146,8 +138,7 @@ export class PlaywrightAdapter {
     origin: string; policy: Policy; headless?: boolean; timeoutMs: number; deadline: number;
     onEvent?: (event: SurfaceEvent) => Promise<void>;
   }): Promise<PlaywrightAdapter> {
-    if (options.policy.appId !== harborApp.appId || options.policy.appVersion !== harborApp.appVersion
-      || !Number.isFinite(options.deadline) || options.deadline <= Date.now()
+    if (!Number.isFinite(options.deadline) || options.deadline <= Date.now()
       || !Number.isInteger(options.timeoutMs) || options.timeoutMs <= 0) throw new SurfaceError('POLICY_BLOCKED');
     let adapter: PlaywrightAdapter | undefined;
     let violation: string | undefined;
@@ -212,6 +203,11 @@ export class PlaywrightAdapter {
     void this.proxy.close().catch(() => {});
     void this.context.close().catch(() => {});
   }
+  /** Evidence spelling of a URL's path: identifiers become `:id`, unknown routes `[unavailable]`. */
+  canonicalPath(url: string): string {
+    return canonicalPagePath(this.policy, url);
+  }
+  private get app() { return policyApp(this.policy); }
   health(): void {
     if (this.fatal) throw this.fatal;
     if (this.closed || this.page.isClosed()) throw new SurfaceError('SURFACE_CLOSED');
@@ -333,7 +329,7 @@ export class PlaywrightAdapter {
       if (!await candidate.handle.evaluate((element, selected) => element === selected, control.handle)) {
         throw new SurfaceError('UNREPLAYABLE_TARGET');
       }
-      const targetKey = await classifyHarborTarget(control.handle, control.frame, this.origin);
+      const effect = await classifyEffect(control.handle, this.origin);
       const formValues = await control.handle.evaluate((element) => {
         const form = element instanceof HTMLInputElement || element instanceof HTMLButtonElement || element instanceof HTMLSelectElement ? element.form : null;
         if (!form) return {};
@@ -348,7 +344,7 @@ export class PlaywrightAdapter {
       });
       this.health();
       if (control.epoch !== this.epoch || await elementSignature(control.handle) !== control.signature) throw new SurfaceError('STALE_REF');
-      return { target: structuredClone(control.target), targetKey: targetKey ?? null,
+      return { target: structuredClone(control.target), effect,
         framePath: new URL(control.frame.url()).pathname, role: await control.handle.getAttribute('role'), formValues };
     } catch (error) {
       this.health();
@@ -361,7 +357,7 @@ export class PlaywrightAdapter {
     this.health();
     if (!/^\/(?:[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*)?$/.test(path)) { this.fail('POLICY_BLOCKED'); this.health(); }
     const url = `${this.origin}${path}`;
-    if (!authorizeAction(this.policy, { ...harborApp, url, action: 'navigate' }).allowed) { this.fail('POLICY_BLOCKED'); this.health(); }
+    if (!authorizeAction(this.policy, { ...this.app, url, action: 'navigate' }).allowed) { this.fail('POLICY_BLOCKED'); this.health(); }
     await this.onEvent?.({ type: 'action_authorized', action: 'navigate' });
     this.invalidate();
     try {
@@ -384,15 +380,15 @@ export class PlaywrightAdapter {
       this.readable(control.frame);
       if (await elementSignature(control.handle) !== control.signature) throw new SurfaceError('STALE_REF');
       if (await this.unknownDialog()) throw new SurfaceError('UNEXPECTED_DIALOG');
-      const targetKey = await classifyHarborTarget(control.handle, control.frame, this.origin);
-      const decision = authorizeAction(this.policy, {
-        ...harborApp, url: control.frame.url(), action, ...(targetKey === undefined ? {} : { targetKey }),
-      });
-      if (!decision.allowed || !targetKey) { this.fail('POLICY_BLOCKED'); throw new SurfaceError('POLICY_BLOCKED'); }
-      await this.onEvent?.({ type: 'action_authorized', action, targetKey, strategyIndex: control.strategyIndex });
+      // Reading never dispatches anything; every other action is judged by its measured effect.
+      const measure = async (): Promise<Effect> => action === 'extract' ? { kind: 'read' } : classifyEffect(control.handle, this.origin);
+      const effect = await measure();
+      const decision = authorizeAction(this.policy, { ...this.app, url: control.frame.url(), action, effect });
+      if (!decision.allowed) { this.fail('POLICY_BLOCKED'); throw new SurfaceError('POLICY_BLOCKED'); }
+      await this.onEvent?.({ type: 'action_authorized', action, effect: effect.kind, strategyIndex: control.strategyIndex });
       this.health();
       if (await this.unknownDialog()) throw new SurfaceError('UNEXPECTED_DIALOG');
-      if (await classifyHarborTarget(control.handle, control.frame, this.origin) !== targetKey) throw new SurfaceError('STALE_REF');
+      if (JSON.stringify(await measure()) !== JSON.stringify(effect)) throw new SurfaceError('STALE_REF');
       if (control.epoch !== this.epoch || await elementSignature(control.handle) !== control.signature) throw new SurfaceError('STALE_REF');
       const timeout = this.remaining();
       let navigation: Promise<SurfaceError | undefined> | undefined;
@@ -409,7 +405,7 @@ export class PlaywrightAdapter {
         });
         this.health();
         if (submission) revokePost = this.proxy.grantPost(submission.url, submission.body);
-        // All click grants in the Harbor profile cause document navigation, including same-URL POSTs.
+        // Every permitted click is a page load or a form post, so a document navigation must follow.
         navigation = control.frame.waitForNavigation({ waitUntil: 'domcontentloaded', timeout })
           .then(() => undefined, () => new SurfaceError('NAVIGATION_FAILED'));
       }
@@ -495,23 +491,25 @@ export class PlaywrightAdapter {
     } finally { await control?.handle.dispose(); }
   }
 
+  /** Opens a session exactly as the policy's `session` block describes. Credentials come from the caller, never from policy. */
   async authenticate(credentials: { username: string; password: string }): Promise<void> {
-    await this.navigate('/login');
-    const footer = this.page.locator('footer');
-    if (await footer.count() !== 1 || !(await footer.textContent())?.includes('Harbor Core v1.0')) throw new SurfaceError('APP_MISMATCH');
-    for (const [label, value] of [['Operator ID', credentials.username], ['Password', credentials.password]] as const) {
+    const session = this.policy.session;
+    await this.navigate(session.loginPath);
+    if (session.banner !== undefined && await this.page.getByText(session.banner, { exact: false }).count() === 0) throw new SurfaceError('APP_MISMATCH');
+    for (const [label, value] of [[session.fields.username, credentials.username], [session.fields.password, credentials.password]] as const) {
       const control = await this.resolve({ strategies: [{ kind: 'label', text: { source: 'literal', value: label } }] }, {});
       await this.act(control.ref, 'fill', value);
     }
-    const submit = await this.resolve({ strategies: [{ kind: 'role', role: 'button', name: { source: 'literal', value: 'Sign in' } }] }, {});
+    const submit = await this.resolve({ strategies: [{ kind: 'role', role: 'button', name: { source: 'literal', value: session.submit } }] }, {});
     await this.act(submit.ref, 'click');
-    if (!['/members/search', '/notice'].includes(new URL(this.page.url()).pathname)) throw new SurfaceError('AUTH_FAILED');
+    const landed = new URL(this.page.url());
+    if (landed.pathname === session.loginPath || !this.allowed(landed.href)) throw new SurfaceError('AUTH_FAILED');
   }
 
   /**
    * Hands the same page to an operator. Automation must not dispatch while this is active;
-   * the replay engine enforces that by blocking on the intervention. Recording is sanitized to
-   * action kind, trusted targetKey, and canonical path. Typed values are never captured.
+   * the engines enforce that by blocking on the intervention. Recording is sanitized to
+   * action kind, measured effect kind, and canonical path. Typed values are never captured.
    */
   async startHumanControl(onAction: (action: HumanAction) => Promise<void>): Promise<void> {
     this.health();
@@ -553,8 +551,8 @@ export class PlaywrightAdapter {
     try {
       element = await this.operatorElement(frame, 'click', ref);
       if (!control || !element) return;
-      const targetKey = await classifyHarborTarget(element, frame, this.origin);
-      await control.onAction({ action: 'click', ...(targetKey === undefined ? {} : { targetKey }), outcome: 'recorded', path: canonicalPath(frame.url()) });
+      const effect = await classifyEffect(element, this.origin);
+      await control.onAction({ action: 'click', effect: effect.kind, outcome: 'recorded', path: this.canonicalPath(frame.url()) });
     } catch {
       // Recording is best effort; the operator's action itself is governed by the proxy.
     } finally {
@@ -562,17 +560,16 @@ export class PlaywrightAdapter {
     }
   }
 
-  /** Decides one operator form submission. Only `humanActions` rules can grant its POST. */
+  /** Decides one operator form submission. Only `forms` and `humanForms` rules can grant its POST. */
   private async humanSubmit(frame: Frame, ref: unknown): Promise<boolean> {
     const control = this.humanControl;
-    const path = canonicalPath(frame.url());
+    const path = this.canonicalPath(frame.url());
     let element: ElementHandle<Element> | null = null;
     try {
       element = await this.operatorElement(frame, 'submit', ref);
       if (!control || !element) return false;
-      const targetKey = await classifyHarborTarget(element, frame, this.origin);
-      const decision = targetKey === undefined ? { allowed: false as const }
-        : authorizeHumanAction(this.policy, { ...harborApp, url: frame.url(), action: 'click', targetKey });
+      const effect = await classifyEffect(element, this.origin);
+      const decision = authorizeHumanAction(this.policy, { ...this.app, url: frame.url(), effect });
       const submission = decision.allowed ? await element.evaluate((node) => {
         const form = node instanceof HTMLFormElement ? node
           : (node instanceof HTMLButtonElement || node instanceof HTMLInputElement) ? node.form : null;
@@ -588,12 +585,12 @@ export class PlaywrightAdapter {
         return method === 'post' ? { url, body: body.toString() } : null;
       }) : null;
       if (!submission) {
-        await control.onAction({ action: 'submit', ...(targetKey === undefined ? {} : { targetKey }), outcome: 'blocked', path });
+        await control.onAction({ action: 'submit', effect: effect.kind, outcome: 'blocked', path });
         return false;
       }
       control.revoke?.();
       control.revoke = this.proxy.grantPost(submission.url, submission.body);
-      await control.onAction({ action: 'submit', targetKey: targetKey!, outcome: 'allowed', path });
+      await control.onAction({ action: 'submit', effect: effect.kind, outcome: 'allowed', path });
       return true;
     } catch {
       return false;
@@ -608,11 +605,15 @@ export class PlaywrightAdapter {
       if (frame.url() === 'about:blank') continue;
       this.readable(frame);
       const dialogs = frame.locator('[role="dialog"], [role="alertdialog"], dialog[open]');
-      const known = frame.getByRole('dialog', { name: 'System notice', exact: true });
       for (const dialog of await dialogs.elementHandles()) {
         try {
-          if (await dialog.isVisible() && (await known.count() !== 1
-            || !await known.evaluate((node, actual) => node === actual, dialog))) return true;
+          if (!await dialog.isVisible()) continue;
+          let known = false;
+          for (const name of this.policy.knownDialogs ?? []) {
+            const candidate = frame.getByRole('dialog', { name, exact: true });
+            if (await candidate.count() === 1 && await candidate.evaluate((node, actual) => node === actual, dialog)) { known = true; break; }
+          }
+          if (!known) return true;
         } finally { await dialog.dispose(); }
       }
     }
@@ -742,8 +743,7 @@ export class PlaywrightAdapter {
     if (this.page.isClosed()) return { frames: [{ index: 0, allowed: false, path: '[unavailable]', nodes: [], truncated: true }] };
     for (const [index, frame] of this.page.frames().slice(0, 10).entries()) {
       const allowed = this.allowed(frame.url());
-      let path = allowed ? new URL(frame.url()).pathname.replace(/\/[0-9]{5}(?=\/|$)/g, '/:memberId') : '[blocked]';
-      if (!['/', '/login', '/members/search', '/members/:memberId', '/members/:memberId/accounts', '/notice', '[blocked]'].includes(path)) path = '[unavailable]';
+      const path = allowed ? this.canonicalPath(frame.url()) : '[blocked]';
       if (!allowed) { frames.push({ index, allowed, path, nodes: [], truncated: false }); continue; }
       try {
         const nodes = await frame.locator('body, body *').evaluateAll((elements) => {

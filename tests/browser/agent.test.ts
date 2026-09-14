@@ -11,7 +11,7 @@ import { agentResultSchema, type RouteDecision, type RouterModel } from '../../s
 import { FileCapabilityRegistry } from '../../src/artifact/registry.js';
 import { parseArtifact } from '../../src/artifact/schema.js';
 import type { VerificationTarget } from '../../src/compiler/verify.js';
-import type { DiscoveryDecision } from '../../src/discovery/contracts.js';
+import type { DiscoveryDecision, GoalSpec } from '../../src/discovery/contracts.js';
 import type { DiscoveryModel } from '../../src/discovery/model.js';
 import { loadPolicy, parsePolicy } from '../../src/policy/policy.js';
 
@@ -24,7 +24,15 @@ const key = (version: number) => ({ ...app, name: 'get_member_savings_balance', 
 const goal = (memberId: string) => `look up member ${memberId} and read their current savings balance`;
 
 type Control = { ref: string; tag: string; label: string; text: string; scope: 'main' | 'frame'; row?: string; column?: string | number };
-type Context = { inputs: { memberId: string }; observation: { controls: Control[] }; actions: Array<{ tool: string; status: string }>; extracted: Array<{ field: string; scope: string }> };
+type Context = { contract: GoalSpec; observation: { controls: Control[] }; actions: Array<{ tool: string; status: string }>; extracted: Array<{ name: string; framePath: string }> };
+const spec = (memberId: string): GoalSpec => ({
+  name: 'get_member_savings_balance', description: 'Read the savings balance and currency for a member.',
+  inputs: { memberId: { value: memberId, description: 'Member identifier.' } },
+  outputs: {
+    savingsBalanceCents: { parser: 'usd_cents', description: 'Savings balance in cents.', sensitive: true },
+    currency: { parser: 'text', description: 'Currency code.', sensitive: false },
+  },
+});
 
 /** Test-only scripted discovery model using visible semantics, never production selectors. */
 function scriptedDiscovery(memberId: string, calls: { intent: number; decide: number }): DiscoveryModel {
@@ -32,12 +40,12 @@ function scriptedDiscovery(memberId: string, calls: { intent: number; decide: nu
   const click = (ref: string): DiscoveryDecision => ({ tool: 'click', input: { ref, reason: 'locate_record' } });
   return {
     source: 'test', provider: 'synthetic', modelId: 'configured-test-model', secretValues: [],
-    intent: () => { calls.intent++; return Promise.resolve(reply({ status: 'ready' as const, memberId })); },
-    decide: (input) => {
+    intent: () => { calls.intent++; return Promise.resolve(reply({ status: 'ready' as const, goal: spec(memberId) })); },
+    decide: (_spec, input) => {
       const context = input as Context;
       const controls = context.observation.controls;
       const alert = controls.find((control) => control.text === 'No member found');
-      if (alert) return Promise.resolve(reply({ tool: 'complete', input: { reason: 'confirm_completion', ref: alert.ref, outcome: 'member_not_found' } }));
+      if (alert) return Promise.resolve(reply({ tool: 'complete', input: { reason: 'confirm_completion', ref: alert.ref, outcome: 'business_outcome', code: 'MEMBER_NOT_FOUND' } }));
       const member = controls.find((control) => control.tag === 'a' && control.text === 'View member');
       if (member) return Promise.resolve(reply(click(member.ref)));
       const field = controls.find((control) => control.tag === 'input' && control.label === 'Member ID');
@@ -48,18 +56,18 @@ function scriptedDiscovery(memberId: string, calls: { intent: number; decide: nu
         return Promise.resolve(reply(click(controls.find((control) => control.tag === 'button' && control.text === 'Search')!.ref)));
       }
       const reads = [
-        { field: 'memberId', scope: 'main', control: controls.find((control) => control.scope === 'main' && control.row === 'Member ID') },
-        { field: 'memberId', scope: 'frame', control: controls.find((control) => control.scope === 'frame' && control.tag === 'strong' && control.text === memberId) },
-        { field: 'savingsBalanceCents', scope: 'frame', control: controls.find((control) => control.row === 'Savings' && control.column === 'Current balance') },
-        { field: 'currency', scope: 'frame', control: controls.find((control) => control.row === 'Savings' && control.column === 'Currency') },
+        { name: 'memberId', frame: false, control: controls.find((control) => control.scope === 'main' && control.row === 'Member ID') },
+        { name: 'memberId', frame: true, control: controls.find((control) => control.scope === 'frame' && control.tag === 'strong' && control.text === memberId) },
+        { name: 'savingsBalanceCents', frame: true, control: controls.find((control) => control.row === 'Savings' && control.column === 'Current balance') },
+        { name: 'currency', frame: true, control: controls.find((control) => control.row === 'Savings' && control.column === 'Currency') },
       ] as const;
       for (const next of reads) {
-        if (!context.extracted.some((read) => read.field === next.field && read.scope === next.scope)) {
-          return Promise.resolve(reply(next.control ? { tool: 'extract', input: { ref: next.control.ref, field: next.field, reason: 'read_value' } }
+        if (!context.extracted.some((read) => read.name === next.name && read.framePath.endsWith('/accounts') === next.frame)) {
+          return Promise.resolve(reply(next.control ? { tool: 'extract', input: { ref: next.control.ref, name: next.name, reason: 'read_value' } }
             : { tool: 'wait', input: { reason: 'wait_for_ui', ms: 50 } }));
         }
       }
-      return Promise.resolve(reply({ tool: 'complete', input: { reason: 'confirm_completion', outcome: 'success', ref: null } }));
+      return Promise.resolve(reply({ tool: 'complete', input: { reason: 'confirm_completion', outcome: 'success', code: null, ref: null } }));
     },
   };
 }

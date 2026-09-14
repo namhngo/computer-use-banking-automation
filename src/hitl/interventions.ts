@@ -51,7 +51,7 @@ const openSchema = z.strictObject({
   runId: identifierSchema, stepId: identifierSchema, reason: identifierSchema, path: evidencePathSchema,
 });
 const humanActionSchema = z.strictObject({
-  action: identifierSchema, targetKey: identifierSchema.optional(), outcome: identifierSchema, path: evidencePathSchema,
+  action: identifierSchema, effect: identifierSchema, outcome: identifierSchema, path: evidencePathSchema,
 });
 const codePattern = /^[A-Z][A-Z0-9_]{0,63}$/;
 const now = () => new Date().toISOString();
@@ -162,7 +162,7 @@ export class InterventionBroker {
   }
 
   /** Records a sanitized operator action in the same browser; values are never accepted here. */
-  recordHumanAction(id: string, action: { action: string; targetKey?: string; outcome: string; path: string }): void {
+  recordHumanAction(id: string, action: { action: string; effect: string; outcome: string; path: string }): void {
     const entry = this.entries.get(id);
     const parsed = humanActionSchema.safeParse(action);
     if (!entry || !parsed.success || entry.view.state !== 'human_control' || entry.record.humanActions.length >= 200) return;

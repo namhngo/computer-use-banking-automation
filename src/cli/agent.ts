@@ -11,13 +11,15 @@ import { createRouterModel } from '../agent/model.js';
 import { FileCapabilityRegistry } from '../artifact/registry.js';
 import { readConfig } from '../config.js';
 import { createDiscoveryModel, readLiveModelConfiguration } from '../discovery/model.js';
+import { openOperatorConsole, parseHitlFlags } from '../hitl/cli.js';
 import { loadPolicy, parsePolicy } from '../policy/policy.js';
 
 /**
  * `pnpm agent --goal "..."`: the goal-driven entrypoint. One model call routes the goal; a
  * verified capability replays without a model; otherwise discovery runs, its transcript is
- * compiled, and the draft is verified in fresh sandboxes (sandbox mode only). Direct
- * `pnpm discover` / `pnpm replay` remain available and unchanged.
+ * compiled, and the draft is verified in fresh sandboxes (sandbox mode only). With `--hitl`,
+ * both the replay and the discovery loop can pause and hand the same browser to an operator.
+ * Direct `pnpm discover` / `pnpm replay` remain available and unchanged.
  */
 
 let result: AgentResult;
@@ -40,6 +42,9 @@ try {
       'max-duration-ms': { type: 'string', default: '180000' },
       'model-timeout-ms': { type: 'string', default: '30000' },
       'max-tokens': { type: 'string', default: '40000' },
+      hitl: { type: 'boolean', default: false },
+      'hitl-port': { type: 'string', default: '4100' },
+      'hitl-wait-ms': { type: 'string', default: '300000' },
     },
   });
   const supplied = new Set<string>();
@@ -56,9 +61,25 @@ try {
     || !values['evidence-root'].trim() || values['evidence-root'].length > 4096
     || values['verify-inputs'].length > 4) throw new Error();
   const fault = mockFaultSchema.parse(values.fault);
-  const verifyInputs = values['verify-inputs'].map((text) => JSON.parse(text) as unknown);
-  if (verifyInputs.some((input) => input === null || typeof input !== 'object' || Array.isArray(input)
-    || Object.values(input).some((value) => typeof value !== 'string'))) throw new Error();
+  const hitlFlags = parseHitlFlags(values, supplied);
+  // Each --verify-inputs is a JSON object ({"memberId":"10043"}), a name=value list, or bare
+  // values matched to the discovered contract's inputs in order ("10043").
+  const verifyInputs: Record<string, string>[] = values['verify-inputs'].map((text, index) => {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.length > 2000 || trimmed.startsWith('[')) throw new Error();
+    if (trimmed.startsWith('{')) {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+        || Object.values(parsed).some((value) => typeof value !== 'string')) throw new Error();
+      return parsed as Record<string, string>;
+    }
+    return Object.fromEntries(trimmed.split(',').map((part, position) => {
+      const equals = part.indexOf('=');
+      const [name, value] = equals === -1 ? [`_${String(index)}_${String(position)}`, part.trim()] : [part.slice(0, equals).trim(), part.slice(equals + 1).trim()];
+      if (!value || !/^[a-z][a-zA-Z0-9_]{0,63}$/.test(name)) throw new Error();
+      return [name, value];
+    }));
+  });
   function bounded(value: string, max: number): number {
     if (!/^[0-9]+$/.test(value)) throw new Error();
     const number = Number(value);
@@ -78,6 +99,8 @@ try {
   if (!/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?\/?$/.test(target)) throw new Error();
   let origin = new URL(config.targetUrl).origin;
   const credentials = readMockCredentials();
+  // A handoff needs a browser the operator can see; refusing headless here avoids a pause nobody can act on.
+  if (hitlFlags && config.headless) throw new Error();
   const basePolicy = await loadPolicy(values.policy);
   let policy = basePolicy;
   const registry = new FileCapabilityRegistry(values.registry);
@@ -88,12 +111,14 @@ try {
   setupCode = 'CONFIG_ERROR';
 
   let server: ReturnType<typeof serve> | undefined;
+  let console: Awaited<ReturnType<typeof openOperatorConsole>> | undefined;
   const closeServer = async (owned: ReturnType<typeof serve>) => {
     const closing = new Promise<void>((resolve, reject) => owned.close((error) => error ? reject(error) : resolve()));
     if (owned instanceof Server) owned.closeAllConnections();
     await closing;
   };
   try {
+    if (hitlFlags) console = await openOperatorConsole(hitlFlags);
     if (values.sandbox) {
       const { app } = createMockApp({ credentials, fault });
       server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
@@ -105,10 +130,10 @@ try {
     }
     result = await runAgent({
       goal: values.goal, router, discoveryModel, registry, origin, policy, credentials, discoveryLimits,
-      evidenceRoot: values['evidence-root'], headless: config.headless,
+      evidenceRoot: values['evidence-root'], headless: config.headless, ...(console === undefined ? {} : { hitl: console.hitl }),
       // Verification needs sandboxes this process owns; against an external target a draft stays a draft.
       ...(values.sandbox ? { verification: {
-        inputs: verifyInputs as Record<string, string>[],
+        inputs: verifyInputs,
         createTarget: async () => {
           const { app } = createMockApp({ credentials, fault: 'none' });
           const fresh = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
@@ -121,6 +146,7 @@ try {
       } } : {}),
     });
   } finally {
+    await console?.close();
     if (server?.listening) await closeServer(server);
   }
 } catch {

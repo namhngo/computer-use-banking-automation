@@ -8,11 +8,10 @@ import type { ReplayResult } from '../artifact/result.js';
 import { EvidenceSink } from '../evidence/evidence.js';
 import type { SafeSnapshot } from '../evidence/evidence.js';
 import type { InterventionBroker, Validation } from '../hitl/interventions.js';
-import { authorizeAction } from '../policy/policy.js';
+import { authorizeAction, policyApp } from '../policy/policy.js';
 import type { Policy } from '../policy/policy.js';
-import { canonicalPath, PlaywrightAdapter } from '../surface/playwright-adapter.js';
+import { PlaywrightAdapter } from '../surface/playwright-adapter.js';
 import { SurfaceError } from '../surface/errors.js';
-import { harborApp } from '../surface/harbor-profile.js';
 
 export async function runReplay(options: {
   artifact: unknown;
@@ -101,7 +100,8 @@ export async function runReplay(options: {
     fallbackCode = 'INPUT_INVALID';
     const values = validateValues(artifact.inputs, options.inputs);
     fallbackCode = 'INVOCATION_INVALID';
-    const prepared = prepareInvocation(artifact, values, { ...harborApp, mode: options.mode });
+    const app = policyApp(options.policy);
+    const prepared = prepareInvocation(artifact, values, { ...app, mode: options.mode });
     const capability = prepared.artifact;
     const inputs = prepared.inputs;
     fallbackCode = 'AUTH_SETUP_INVALID';
@@ -112,7 +112,7 @@ export async function runReplay(options: {
       throw new SurfaceError('AUTH_SETUP_INVALID');
     }
     const entry = authorizeAction(options.policy, {
-      ...harborApp, url: `${options.origin}${capability.app.entryPath}`, action: 'navigate',
+      ...app, url: `${options.origin}${capability.app.entryPath}`, action: 'navigate',
     });
     if (!entry.allowed || entry.risk !== 'read_only') throw new SurfaceError('POLICY_BLOCKED');
 
@@ -339,14 +339,13 @@ export async function runReplay(options: {
       let snapshot: SafeSnapshot | undefined;
       try { snapshot = await browser.snapshot(); } catch { /* The operator has the live page; the snapshot is a courtesy. */ }
       if (snapshot) await record(() => sink!.snapshot(snapshot));
-      const intervention = broker.open({ runId, stepId: step.id, reason, path: canonicalPath(browser.page.url()) }, {
+      const intervention = broker.open({ runId, stepId: step.id, reason, path: browser.canonicalPath(browser.page.url()) }, {
         onClaim: async () => {
           controlOwner = 'human';
           await event({ type: 'intervention_claimed', stepId: step.id, outcome: 'human_control' });
           await browser.startHumanControl(async (action) => {
             broker.recordHumanAction(intervention.id, action);
-            await event({ type: 'human_action', stepId: step.id, action: action.action, outcome: action.outcome,
-              ...(action.targetKey === undefined ? {} : { targetKey: action.targetKey }) });
+            await event({ type: 'human_action', stepId: step.id, action: action.action, outcome: action.outcome, effect: action.effect });
           });
         },
         onRelease: () => browser.stopHumanControl(),

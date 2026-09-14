@@ -55,7 +55,7 @@ describe('catalog', () => {
   it('lists only verified revisions of the configured app, newest per name, without executable detail', () => {
     const other: CapabilityArtifact = { ...verified, app: { ...verified.app, appVersion: '9.9' } };
     const older: CapabilityArtifact = { ...verified, identity: { ...verified.identity, version: 1 } };
-    const catalog = buildCatalog([draft, other, older, verified]);
+    const catalog = buildCatalog([draft, other, older, verified], { appId: 'harbor_core', appVersion: '1.0' });
     expect(catalog).toEqual([{
       name: 'get_member_savings_balance', version: 2, description: verified.identity.description, risk: 'read_only',
       inputs: { memberId: { description: verified.inputs.memberId!.description, type: 'string', format: 'digits', minLength: 5, maxLength: 5 } },
@@ -65,7 +65,7 @@ describe('catalog', () => {
       },
     }]);
     expect(JSON.stringify(catalog)).not.toMatch(/"steps"|"selector"|"strategies"|"checkpoint"|"kind"/);
-    expect(buildCatalog([draft])).toEqual([]);
+    expect(buildCatalog([draft], { appId: 'harbor_core', appVersion: '1.0' })).toEqual([]);
   });
 });
 
@@ -74,8 +74,11 @@ describe('route decisions', () => {
     expect(parseRouteDecision('execute', { capability: 'get_member_savings_balance', version: 2, inputs: { memberId: '12345' } }))
       .toEqual({ tool: 'execute', input: { capability: 'get_member_savings_balance', version: 2, inputs: { memberId: '12345' } } });
     expect(() => parseRouteDecision('navigate', { path: '/' })).toThrow('Invalid route decision.');
-    expect(() => parseRouteDecision('discover', { reason: 'no_compatible_capability', inputs: { memberId: '1234' } })).toThrow('Invalid route decision.');
-    expect(() => parseRouteDecision('clarify', { reason: 'missing_member_id', question: 'x'.repeat(301) })).toThrow('Invalid route decision.');
+    expect(() => parseRouteDecision('discover', { reason: 'no_compatible_capability', inputs: { 'Member ID': '1234' } })).toThrow('Invalid route decision.');
+    expect(() => parseRouteDecision('discover', { reason: 'no_compatible_capability', inputs: { memberId: '' } })).toThrow('Invalid route decision.');
+    expect(parseRouteDecision('discover', { reason: 'no_compatible_capability', inputs: { orderId: 'A-77' } }))
+      .toEqual({ tool: 'discover', input: { reason: 'no_compatible_capability', inputs: { orderId: 'A-77' } } });
+    expect(() => parseRouteDecision('clarify', { reason: 'missing_input', question: 'x'.repeat(301) })).toThrow('Invalid route decision.');
     expect(() => parseRouteDecision('execute', { capability: 'get_member_savings_balance', version: 2, inputs: { memberId: '12345' }, extra: 1 })).toThrow();
     expect(() => parseRouteDecision('unsupported', { reason: 'because' })).toThrow('Invalid route decision.');
   });
@@ -90,7 +93,7 @@ describe('route decisions', () => {
         const system = request.prompt.find((entry) => entry.role === 'system');
         expect(system && 'content' in system ? system.content : '').toBe(ROUTER_INSTRUCTIONS);
         const call = { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'clarify',
-          input: JSON.stringify({ reason: 'missing_member_id', question: 'Which member ID should I look up?' }) };
+          input: JSON.stringify({ reason: 'missing_input', question: 'Which member ID should I look up?' }) };
         const content = mode === 'tool' ? [call] : mode === 'text' ? [{ type: 'text' as const, text: 'Sure!' }] : [call, { ...call, toolCallId: 'call_2' }];
         return Promise.resolve({
           content, finishReason: { unified: 'tool-calls' as const, raw: 'tool_calls' }, warnings: [],
@@ -101,7 +104,7 @@ describe('route decisions', () => {
     });
     const router = createRouterModel({ model: sdk, modelId: 'test-router-sdk', provider: 'test-sdk', source: 'test', secretValues: [secret] });
     const reply = await router.route({ goal: 'read a savings balance', catalog: [] }, AbortSignal.timeout(5000));
-    expect(reply).toMatchObject({ value: { tool: 'clarify', input: { reason: 'missing_member_id' } }, usage: { inputTokens: 30, outputTokens: 6 }, modelId: 'test-router-sdk' });
+    expect(reply).toMatchObject({ value: { tool: 'clarify', input: { reason: 'missing_input' } }, usage: { inputTokens: 30, outputTokens: 6 }, modelId: 'test-router-sdk' });
     for (mode of ['text', 'double'] as const) {
       await expect(router.route({ goal: 'read a savings balance', catalog: [] }, AbortSignal.timeout(5000))).rejects.toBeInstanceOf(ModelCallError);
     }
@@ -110,13 +113,13 @@ describe('route decisions', () => {
 
 describe('runAgent without a browser', () => {
   it('returns clarification and unsupported decisions verbatim with the routing receipt', async () => {
-    const clarified = await runAgent(options(fakeRouter(() => ({ tool: 'clarify', input: { reason: 'missing_member_id', question: 'Which member?' } }))));
-    expect(clarified).toMatchObject({ kind: 'CLARIFICATION_REQUIRED', reason: 'missing_member_id', question: 'Which member?', source: 'test',
+    const clarified = await runAgent(options(fakeRouter(() => ({ tool: 'clarify', input: { reason: 'missing_input', question: 'Which member?' } }))));
+    expect(clarified).toMatchObject({ kind: 'CLARIFICATION_REQUIRED', reason: 'missing_input', question: 'Which member?', source: 'test',
       routing: { decision: 'clarify', modelId: 'actual-router', responseId: 'resp_1', usage: { inputTokens: 20, outputTokens: 4 }, catalog: [] } });
     expect(clarified.agentRunId).toMatch(/^agent_[a-f0-9]{32}$/);
-    const refused = await runAgent(options(fakeRouter(() => ({ tool: 'unsupported', input: { reason: 'changes_financial_data' } })),
+    const refused = await runAgent(options(fakeRouter(() => ({ tool: 'unsupported', input: { reason: 'changes_data' } })),
       { goal: 'transfer 500 from member 12345 savings to checking' }));
-    expect(refused).toMatchObject({ kind: 'UNSUPPORTED_GOAL', reason: 'changes_financial_data', routing: { decision: 'unsupported' } });
+    expect(refused).toMatchObject({ kind: 'UNSUPPORTED_GOAL', reason: 'changes_data', routing: { decision: 'unsupported' } });
     expect(agentResultSchema.safeParse(refused).success).toBe(true);
   });
 

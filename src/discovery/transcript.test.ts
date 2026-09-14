@@ -3,11 +3,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Target } from '../artifact/schema.js';
+import { fileURLToPath } from 'node:url';
+import { canonicalPagePath, loadPolicy } from '../policy/policy.js';
 import { transcriptSchema, type DiscoveryRecord, type DiscoveryTranscript } from './contracts.js';
 import { writeTranscript } from './transcript.js';
 
 const memberId = '12345';
-const options = { inputs: { memberId }, secrets: ['private-password-98'] };
+const policy = await loadPolicy(fileURLToPath(new URL('../../policy.yaml', import.meta.url)));
+const canonicalPath = (path: string) => canonicalPagePath(policy, `http://localhost:4000${path}`, [memberId]);
+const options = { inputs: { memberId }, secrets: ['private-password-98'], canonicalPath };
+const goal = {
+  name: 'get_member_savings_balance', description: 'Read the savings balance and currency for a member.',
+  inputs: { memberId: { description: 'Member identifier.', format: 'digits', length: 5 } },
+  outputs: {
+    savingsBalanceCents: { parser: 'usd_cents', description: 'Savings balance in cents.', sensitive: true },
+    currency: { parser: 'text', description: 'Currency code.', sensitive: false },
+  },
+} as const;
 const input = { source: 'input', name: 'memberId' } as const;
 const literal = (value: string) => ({ source: 'literal', value } as const);
 const target = (text: string): Target => ({ strategies: [{ kind: 'label', text: literal(text) }] });
@@ -17,8 +29,8 @@ function transcript(records: DiscoveryRecord[] = [{
   ref: 'e1_1', target: target('Member'), value: literal(memberId),
 }]): DiscoveryTranscript {
   return {
-    schemaVersion: 1, kind: 'discovery_transcript', source: 'test', provider: 'test-provider', modelId: 'authored-test-model',
-    runId: `run_${'a'.repeat(32)}`, promptVersion: 1, goalType: 'member_savings_balance', inputNames: ['memberId'], status: 'SUCCESS',
+    schemaVersion: 2, kind: 'discovery_transcript', source: 'test', provider: 'test-provider', modelId: 'authored-test-model',
+    runId: `run_${'a'.repeat(32)}`, promptVersion: 2, goal: structuredClone(goal), status: 'SUCCESS',
     calls: [{ turn: 0, phase: 'intent', status: 'returned', modelId: 'authored-test-model', responseId: 'response-a', usage: { inputTokens: 12, outputTokens: 7 } }],
     records,
   };
@@ -70,22 +82,22 @@ describe('writeTranscript', () => {
     expect(original).toEqual(before);
   });
 
-  it('normalizes the declared member in both paths and retains every allowed canonical path', async () => {
-    const paths = ['/', '/login', '/members/search', '/members/:memberId', '/members/:memberId/accounts', '/notice', '[unavailable]', '[blocked]', '/members/12345', '/members/12345/accounts'];
+  it('spells identifiers in both paths as :id and retains every allowed page', async () => {
+    const paths = ['/', '/login', '/members/search', '/notice', '/members/12345', '/members/12345/accounts', '/members/98765/accounts'];
     const original = transcript(paths.map((path, i) => ({ turn: i + 1, tool: 'navigate', reason: 'locate_record', status: 'succeeded', path, framePath: path })));
     original.source = 'live';
     const before = structuredClone(original);
     await writeTranscript(directory, original, options);
     const result = await persisted();
     expect(result.source).toBe('live');
-    expect(result.records.map(({ path }) => path)).toEqual([...paths.slice(0, 8), '/members/:memberId', '/members/:memberId/accounts']);
+    expect(result.records.map(({ path }) => path)).toEqual(['/', '/login', '/members/search', '/notice', '/members/:id', '/members/:id/accounts', '/members/:id/accounts']);
     expect(result.records.every(({ path, framePath }) => path === framePath)).toBe(true);
     expect(JSON.stringify(result.records)).not.toContain(memberId);
     expect(original).toEqual(before);
   });
 
-  it('rejects another member rather than inventing an input binding, without mutating proposals', async () => {
-    for (const path of ['/members/98765', '/members/98765/accounts', '/members/012345', '/members/123456/accounts']) {
+  it('refuses a path evidence cannot name rather than inventing a spelling, without mutating proposals', async () => {
+    for (const path of ['[unavailable]', '[blocked]', '/members/:id', '/transfer', '/members/12345/sub-accounts']) {
       for (const key of ['path', 'framePath']) {
         const original = transcript([{ turn: 1, tool: 'fill', reason: 'enter_input', status: 'succeeded', target: target(memberId), value: literal(memberId), [key]: path }]);
         const before = structuredClone(original);
@@ -96,20 +108,23 @@ describe('writeTranscript', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
-  it('allows missing member input only for empty nonsuccess pre-intent transcripts', async () => {
-    const preintent = transcript([]);
+  it('allows a missing goal only for empty nonsuccess pre-intent transcripts, and inputs must match the goal', async () => {
+    const preintent = { ...transcript([]), goal: null };
     preintent.status = 'CLARIFICATION_REQUIRED';
-    const noInput = { inputs: {}, secrets: options.secrets };
+    const noInput = { inputs: {}, secrets: options.secrets, canonicalPath };
     for (const invalid of [
-      transcript([]), { ...preintent, records: transcript().records },
+      { ...transcript([]), goal: null }, { ...preintent, records: transcript().records },
       { ...preintent, calls: [{ ...preintent.calls[0], phase: 'action' }] },
       { ...preintent, calls: [{ ...preintent.calls[0], turn: 1 }] },
-      ...['/members/:memberId', '/members/:memberId/accounts', '/members/12345'].flatMap((path) => ['path', 'framePath'].map((key) => ({
+      ...['/members/12345', '/members/12345/accounts'].flatMap((path) => ['path', 'framePath'].map((key) => ({
         ...preintent, records: [{ turn: 1, tool: 'navigate', reason: 'locate_record', status: 'succeeded', [key]: path }],
       }))),
     ]) await expect(writeTranscript(directory, invalid, noInput)).rejects.toThrow(/^TRANSCRIPT_UNSAFE$/);
-    for (const invalidId of ['', '1234', 'abcde']) {
-      await expect(writeTranscript(directory, preintent, { ...options, inputs: { memberId: invalidId } })).rejects.toThrow(/^TRANSCRIPT_UNSAFE$/);
+    for (const inputs of [{ memberId: '' }, { memberId }, { Member: memberId }, { memberId, other: 'x' }]) {
+      await expect(writeTranscript(directory, preintent, { ...options, inputs })).rejects.toThrow(/^TRANSCRIPT_UNSAFE$/);
+    }
+    for (const inputs of [{}, { member: memberId }, { memberId, extra: 'x' }]) {
+      await expect(writeTranscript(directory, transcript(), { ...options, inputs })).rejects.toThrow(/^TRANSCRIPT_UNSAFE$/);
     }
     expect(await readdir(directory)).toEqual([]);
     await writeTranscript(directory, preintent, noInput);
@@ -117,7 +132,7 @@ describe('writeTranscript', () => {
   });
 
   it('rejects noncanonical paths rather than truncating or accepting arbitrary navigation', async () => {
-    for (const path of ['/members/12345?secret=x', '/members/12345/other', '/members/%31%32%33%34%35', '/members/name', '/members/12345/', '//login', '/login#x', 'https://example.test/login', '/../login']) {
+    for (const path of ['/members/12345?secret=x', '/members/12345/other', '/members/%31%32%33%34%35', '/members/12345/', '//login', '/login#x', 'https://example.test/login', '/../login']) {
       for (const key of ['path', 'framePath']) {
         await expect(writeTranscript(directory, transcript([{ turn: 1, tool: 'navigate', reason: 'locate_record', status: 'succeeded', [key]: path }]), options)).rejects.toThrow('TRANSCRIPT_UNSAFE');
       }
@@ -181,9 +196,9 @@ describe('writeTranscript', () => {
   it('rejects known raw and parsed sensitive outputs, while retaining nonsensitive currency text', async () => {
     const sensitiveOptions = { ...options, sensitiveValues: ['$4,567.89', '456789'] };
     for (const value of ['$4,567.89', '456789', '%24' + '4%2C567.89', Buffer.from('456789').toString('base64'), Buffer.from('$4,567.89').toString('hex')]) {
-      await expect(writeTranscript(directory, transcript([{ turn: 1, tool: 'extract', reason: 'read_value', status: 'succeeded', field: 'savingsBalanceCents', target: target(value) }]), sensitiveOptions)).rejects.toThrow('TRANSCRIPT_UNSAFE');
+      await expect(writeTranscript(directory, transcript([{ turn: 1, tool: 'extract', reason: 'read_value', status: 'succeeded', name: 'savingsBalanceCents', target: target(value) }]), sensitiveOptions)).rejects.toThrow('TRANSCRIPT_UNSAFE');
     }
-    await writeTranscript(directory, transcript([{ turn: 1, tool: 'extract', reason: 'read_value', status: 'succeeded', field: 'currency', target: target('USD') }]), sensitiveOptions);
+    await writeTranscript(directory, transcript([{ turn: 1, tool: 'extract', reason: 'read_value', status: 'succeeded', name: 'currency', target: target('USD') }]), sensitiveOptions);
     expect((await persisted()).records[0]?.target).toEqual(target('USD'));
   });
 
@@ -197,9 +212,13 @@ describe('writeTranscript', () => {
   it('strictly rejects private extra fields, arbitrary reasons, and malformed field identifiers', async () => {
     const base = transcript();
     const invalid = [
-      ...['goal', 'modelText', 'reasoning', 'messages', 'observations', 'formValues', 'outputs', 'inputs'].map((key) => ({ ...base, [key]: 'private' })),
-      { ...base, inputNames: ['memberId', memberId] },
-      ...[{ reason: 'freeform explanation' }, { field: 'password' }, { targetKey: '../private' }, { ref: 'raw-ref' }, { messages: ['private'] }, { target: { ...target('Member'), observations: 'private' } }].map((extra) => ({ ...base, records: [{ ...base.records[0], ...extra }] })),
+      ...['goalType', 'modelText', 'reasoning', 'messages', 'observations', 'formValues', 'outputs', 'inputs'].map((key) => ({ ...base, [key]: 'private' })),
+      { ...base, goal: { ...goal, inputs: { ...goal.inputs, [memberId]: goal.inputs.memberId } } },
+      { ...base, goal: { ...goal, values: { memberId } } },
+      ...[{ reason: 'freeform explanation' }, { name: 'password' }, { effect: '../private' }, { effect: 'click' }, { ref: 'raw-ref' }, { messages: ['private'] }, { target: { ...target('Member'), observations: 'private' } }].map((extra) => ({ ...base, records: [{ ...base.records[0], ...extra }] })),
+      // A read must name something the goal declared, on an extract.
+      { ...base, records: [{ turn: 1, tool: 'extract', reason: 'read_value', status: 'succeeded', name: 'password', target: target('x') }] },
+      { ...base, records: [{ turn: 1, tool: 'click', reason: 'read_value', status: 'succeeded', name: 'currency', target: target('x') }] },
       { ...base, calls: [{ ...base.calls[0], messages: ['private'] }] },
     ];
     for (const value of invalid) await expect(writeTranscript(directory, value, options)).rejects.toThrow('TRANSCRIPT_UNSAFE');
@@ -219,7 +238,7 @@ describe('writeTranscript', () => {
 
   it('rejects proposals on failed dispatches but permits finite-code error records without proposals', async () => {
     for (const status of ['rejected', 'blocked'] as const) {
-      for (const proposal of [{ target: target('Generic') }, { value: input }, { path: '/login' }, { framePath: '[blocked]' }, { targetKey: 'proposal' }]) {
+      for (const proposal of [{ target: target('Generic') }, { value: input }, { path: '/login' }, { framePath: '/login' }, { effect: 'read' as const }]) {
         await expect(writeTranscript(directory, transcript([{ turn: 1, tool: 'click', reason: 'inspect_state', status, ...proposal }]), options)).rejects.toThrow('TRANSCRIPT_UNSAFE');
       }
     }
@@ -251,8 +270,8 @@ describe('writeTranscript', () => {
       await expect(writeTranscript(directory, { ...data, calls: [{ ...data.calls[0], ...extra }] }, options)).rejects.toThrow(/^TRANSCRIPT_UNSAFE$/);
     }
     const before = structuredClone(data);
-    await writeTranscript(directory, data, { inputs: {}, secrets: options.secrets });
-    expect(await persisted()).toEqual(before);
+    await writeTranscript(directory, { ...data, goal: null }, { inputs: {}, secrets: options.secrets, canonicalPath });
+    expect(await persisted()).toEqual({ ...before, goal: null });
     expect(data).toEqual(before);
   });
 

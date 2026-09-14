@@ -341,7 +341,7 @@ it.each([
       'Avery Sample', 'USD', 'Account service unavailable']) expect(files.join('\n')).not.toContain(secret);
     if (fault === 'app_error') {
       const snapshot = JSON.parse(files[result.evidence.indexOf('snapshot_1.json')]!) as SafeSnapshot;
-      const accounts = snapshot.frames.find((frame) => frame.path === '/members/:memberId/accounts');
+      const accounts = snapshot.frames.find((frame) => frame.path === '/members/:id/accounts');
       expect(accounts?.nodes).toEqual(expect.arrayContaining([
         expect.objectContaining({ tag: 'h1', textPresent: true, visible: true }),
       ]));

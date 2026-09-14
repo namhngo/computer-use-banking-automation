@@ -2,32 +2,48 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { EvidenceSink, type SafeSnapshot } from '../evidence/evidence.js';
-import { authorizeRequest, type Policy } from '../policy/policy.js';
+import type { InterventionBroker } from '../hitl/interventions.js';
+import { authorizeRequest, canonicalPagePath, type Policy } from '../policy/policy.js';
 import { SurfaceError } from '../surface/errors.js';
 import { PlaywrightAdapter } from '../surface/playwright-adapter.js';
 import {
-  DiscoveryError, discoveryResultSchema, intentSchema, ModelCallError, parseDecision, usageSchema,
-  type DiscoveryRecord, type DiscoveryResult, type DiscoveryTranscript, type ModelCallReceipt, type ModelReply,
-} from './contracts.js';
+  inputValues, readDeclared, verifyBusinessOutcome, verifySuccess, type DiscoverySurface, type ReadEvidence, type ReadValue,
+} from './acceptance.js';
 import {
-  readGoalField, verifyBalanceCompletion, verifyBusinessOutcome, type DiscoverySurface, type ReadEvidence,
-} from './harbor-goal.js';
+  DiscoveryError, discoveryResultSchema, intentSchema, ModelCallError, parseDecision, toolInputSchemas, transcriptGoal, usageSchema,
+  type DiscoveryRecord, type DiscoveryResult, type DiscoveryTranscript, type GoalSpec, type ModelCallReceipt, type ModelReply,
+} from './contracts.js';
 import { PROMPT_VERSION, type DiscoveryModel } from './model.js';
 import { createSecretGuard } from './privacy.js';
 import { writeTranscript } from './transcript.js';
+
+/**
+ * The discovery agent loop. It is goal-agnostic: the model declares a GoalSpec from the user's
+ * request, then chooses every action from live observations. The engine's job is to make sure
+ * that whatever the model does is authorised by policy, recorded as evidence, and that a
+ * success claim is proven by re-verified reads rather than taken on the model's word.
+ */
 
 type Options = {
   goal: string; model: DiscoveryModel; origin: string; policy: Policy;
   credentials: { username: string; password: string }; headless?: boolean; evidenceRoot?: string;
   limits?: { maxSteps?: number; maxDurationMs?: number; modelTimeoutMs?: number; maxTokens?: number };
   createSurface?: (options: Parameters<typeof PlaywrightAdapter.create>[0]) => Promise<DiscoverySurface>;
+  /**
+   * Same-session human handoff. Without it, `request_human` and an unknown dialog end the run as
+   * BLOCKED. With it, the run pauses, an operator may claim the very same browser, and the model
+   * resumes from a fresh observation only after the operator signals `retry_step` and the page is
+   * validated. `skip_step` has no meaning in a non-deterministic loop and is refused.
+   */
+  hitl?: { broker: InterventionBroker; maxWaitMs: number };
 };
 
 const optionsSchema = z.object({
   goal: z.string().min(1).max(2000).refine((goal) => goal.trim().length > 0),
   origin: z.string().max(500).refine((origin) => URL.parse(origin)?.origin === origin),
   credentials: z.object({ username: z.string().min(1).max(4096), password: z.string().min(1).max(4096) }),
-  headless: z.boolean().optional(), evidenceRoot: z.string().min(1).max(4096).optional(),
+  headless: z.boolean().optional(),
+  evidenceRoot: z.string().min(1).max(4096).optional(),
   limits: z.object({
     maxSteps: z.number().int().min(1).max(50).default(25),
     maxDurationMs: z.number().int().min(1).max(300_000).default(180_000),
@@ -36,11 +52,13 @@ const optionsSchema = z.object({
   }).prefault({}),
 });
 const retryable = new Set(['STALE_REF', 'AMBIGUOUS_TARGET', 'CAPTURE_FAILED', 'UNREPLAYABLE_TARGET',
-  'TARGET_NOT_FOUND', 'FRAME_NOT_FOUND', 'INVALID_TARGET', 'FIELD_MISMATCH', 'WRONG_MEMBER',
-  'INCOMPLETE_EVIDENCE', 'EXTRACTION_FAILED', 'UNSUPPORTED_CURRENCY', 'INVALID_DECISION',
+  'TARGET_NOT_FOUND', 'FRAME_NOT_FOUND', 'INVALID_TARGET', 'FIELD_MISMATCH', 'WRONG_IDENTITY',
+  'INCOMPLETE_EVIDENCE', 'EXTRACTION_FAILED', 'INVALID_DECISION',
   'STATE_CHANGED', 'UNOBSERVED_NAVIGATION']);
 const blocked = new Set(['POLICY_BLOCKED', 'UNEXPECTED_DIALOG', 'SESSION_REQUIRED', 'HUMAN_REQUIRED',
-  'TOKEN_LIMIT', 'STEP_LIMIT', 'DEAD_END']);
+  'TOKEN_LIMIT', 'STEP_LIMIT', 'DEAD_END', 'NEEDS_HUMAN', 'ABORTED_BY_OPERATOR']);
+/** Conditions a human can resolve in the same browser when a handoff broker is attached. */
+const handoffable = new Set(['UNEXPECTED_DIALOG', 'HUMAN_REQUIRED']);
 const surfaceCodes = new Set([...retryable, ...blocked, 'RUN_TIMEOUT', 'ACTION_FAILED', 'NAVIGATION_FAILED',
   'BROWSER_ERROR', 'SURFACE_CLOSED', 'OBSERVATION_LIMIT', 'AUTH_FAILED', 'APP_MISMATCH', 'CONDITION_FAILED',
   'INVALID_VALUE', 'INVALID_ACTION']);
@@ -52,7 +70,7 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
   const usage = { inputTokens: 0, outputTokens: 0 };
   const calls: DiscoveryTranscript['calls'] = [];
   const records: DiscoveryRecord[] = [];
-  const receipts = new Map<string, ReadEvidence>();
+  const receipts: ReadEvidence[] = [];
   const sensitive = new Set<string>();
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -61,12 +79,13 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
   let sink: EvidenceSink | undefined;
   let evidenceFailed = false;
   let transcriptFile: string | undefined;
-  let memberId: string | undefined;
-  let submittedMember: string | undefined;
+  let spec: GoalSpec | undefined;
+  /** Declared inputs whose values were carried by the most recent form submission. */
+  let submitted = new Set<string>();
   let turns = 0;
   let kind: DiscoveryResult['kind'] = 'FAILURE';
   let code = 'INVALID_OPTIONS';
-  let outputs: DiscoveryResult['outputs'];
+  let outputs: Record<string, ReadValue> | undefined;
   let source: DiscoveryModel['source'] = options?.model?.source === 'test' ? 'test' : 'live';
   let metadata: { provider: string; modelId: string } | undefined;
   let secrets: string[] = [];
@@ -137,7 +156,7 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
       || typeof model.decide !== 'function' || !Array.isArray(model.secretValues)
       || !z.array(z.string().max(4096)).max(90).safeParse(model.secretValues).success
       || (options.createSurface !== undefined && typeof options.createSurface !== 'function')
-      || !authorizeRequest(options.policy, { url: `${origin}/login`, method: 'GET' }).allowed) {
+      || !authorizeRequest(options.policy, { url: `${origin}${options.policy.session.loginPath}`, method: 'GET' }).allowed) {
       throw new DiscoveryError('INVALID_OPTIONS');
     }
     source = model.source;
@@ -152,14 +171,15 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
       return value;
     }
     metadata = { provider: modelMetadata(model.provider, 100), modelId: modelMetadata(model.modelId, 100) };
-    // These candidates constrain intent and guard evidence; they never select UI actions.
-    const candidates = [...goal.matchAll(/(?<![\p{L}\p{N}_])[0-9]{5}(?![\p{L}\p{N}_])/gu)].map((match) => match[0]);
-    candidates.forEach((candidate) => sensitive.add(candidate));
-    const deadline = Date.now() + limits.maxDurationMs;
+    const hitl = options.hitl;
+    if (hitl && (typeof hitl.broker?.open !== 'function' || !Number.isInteger(hitl.maxWaitMs)
+      || hitl.maxWaitMs < 1000 || hitl.maxWaitMs > 3_600_000)) throw new DiscoveryError('INVALID_OPTIONS');
+    // The model's budget stops while a human holds the browser; the adapter's hard deadline allows for one full wait.
+    let deadline = Date.now() + limits.maxDurationMs;
+    const hardDeadline = deadline + (hitl ? hitl.maxWaitMs : 0);
     timer = setTimeout(() => abort('RUN_TIMEOUT'), limits.maxDurationMs);
     try {
-      sink = await EvidenceSink.create({ runId, ...(evidenceRoot ? { root: evidenceRoot } : {}),
-        sensitiveValues: [...secrets, ...(candidates.length === 1 ? candidates : [])] });
+      sink = await EvidenceSink.create({ runId, ...(evidenceRoot ? { root: evidenceRoot } : {}), sensitiveValues: secrets });
     }
     catch { throw new DiscoveryError('EVIDENCE_ERROR'); }
     await event({ type: 'discovery_started', phase: 'intent' });
@@ -206,15 +226,25 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
     const intent = intentSchema.safeParse(await call('intent', (signal) => model.intent(goal, signal)));
     if (!intent.success) throw new DiscoveryError('MODEL_ERROR');
     if (intent.data.status === 'unsupported') { kind = 'UNSUPPORTED_GOAL'; code = 'UNSUPPORTED_GOAL'; }
-    else if (intent.data.status !== 'ready' || candidates.length !== 1 || intent.data.memberId !== candidates[0]) {
+    else if (intent.data.status !== 'ready'
+      // An input the user did not literally write is an invention, however plausible.
+      || Object.values(intent.data.goal!.inputs).some((input) => !goal.includes(input.value))
+      || Object.values(intent.data.goal!.inputs).some((input) => guard.contains(input.value))) {
       kind = 'CLARIFICATION_REQUIRED'; code = 'CLARIFICATION_REQUIRED';
     } else {
-      memberId = intent.data.memberId!;
+      const declared = intent.data.goal!;
+      // A capability name that embeds an identifier would leak it into every artifact and evidence file.
+      if (Object.values(declared.inputs).some((input) => declared.name.includes(input.value))) throw new DiscoveryError('MODEL_ERROR');
+      spec = declared;
+      const schemas = toolInputSchemas(spec);
+      const bindings = inputValues(spec);
+      for (const value of Object.values(bindings)) sensitive.add(value);
+      sink.addSensitiveValues([...sensitive]);
       budget();
       await event({ type: 'surface_starting', phase: 'authentication' });
       await ui(async () => {
         const created = await (options.createSurface ?? PlaywrightAdapter.create)({ origin, policy: options.policy,
-          ...(headless === undefined ? {} : { headless }), timeoutMs: Math.min(5000, limits.maxDurationMs), deadline,
+          ...(headless === undefined ? {} : { headless }), timeoutMs: Math.min(5000, limits.maxDurationMs), deadline: hardDeadline,
           onEvent: (value) => event(value) });
         surface = created;
         if (controller.signal.aborted || evidenceFailed) { await close(); check(); }
@@ -225,14 +255,91 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
         get(target, property: keyof DiscoverySurface) {
           if (property === 'health') return () => { check(); target.health(); };
           if (property === 'close') return target.close.bind(target);
+          if (property === 'page') return target.page;
+          if (property === 'canonicalPath') return target.canonicalPath.bind(target);
           return async (...args: unknown[]) => {
             check();
-            const value: unknown = await Reflect.apply(target[property], target, args);
+            const value: unknown = await Reflect.apply(target[property] as (...a: unknown[]) => unknown, target, args);
             check();
             return value;
           };
         },
       });
+      const loginPath = options.policy.session.loginPath;
+      /** True when a broker is attached, the condition is one a person can clear, and the browser is still usable. */
+      function humanEligible(error: unknown): boolean {
+        if (!hitl) return false;
+        const failure = error instanceof DiscoveryError || error instanceof SurfaceError ? error.code : undefined;
+        if (!failure || !handoffable.has(failure)) return false;
+        try { surface!.health(); return true; } catch { return false; }
+      }
+      /**
+       * Pauses the model, offers the same browser to an operator, and resumes from a fresh observation.
+       * Returns normally only for `retry_step`; every other resolution ends the run as BLOCKED.
+       */
+      async function handoff(reason: string): Promise<void> {
+        const broker = hitl!.broker;
+        const stepId = `turn_${turns}`;
+        clearTimeout(timer);
+        await event({ type: 'intervention_opened', stepId, phase: 'action', code: reason });
+        let snapshot: SafeSnapshot | undefined;
+        try { snapshot = await surface!.snapshot(); } catch { /* The operator has the live page; the snapshot is a courtesy. */ }
+        if (snapshot) {
+          const captured = snapshot;
+          try { await bounded(() => sink!.snapshot(captured), 5000, 'EVIDENCE_ERROR'); } catch { evidenceFailed = true; }
+        }
+        check();
+        const intervention = broker.open({ runId, stepId, reason, path: surface!.canonicalPath(surface!.page.url()) }, {
+          onClaim: async () => {
+            await event({ type: 'intervention_claimed', stepId, outcome: 'human_control' });
+            await surface!.startHumanControl(async (action) => {
+              broker.recordHumanAction(intervention.id, action);
+              await event({ type: 'human_action', stepId, action: action.action, outcome: action.outcome, effect: action.effect });
+            });
+          },
+          onRelease: () => surface!.stopHumanControl(),
+          validate: async (action) => {
+            // Discovery has no fixed step to skip: the model re-plans from whatever the operator left behind.
+            if (action === 'skip_step') return { accepted: false, code: 'SKIP_NOT_AVAILABLE' };
+            try {
+              surface!.health();
+              if (await surface!.unknownDialog()) return { accepted: false, code: 'DIALOG_STILL_PRESENT' };
+            } catch { return { accepted: false, code: 'SURFACE_UNUSABLE' }; }
+            return { accepted: true };
+          },
+        });
+        const pausedAt = Date.now();
+        let waiting = true;
+        let resolution: Awaited<ReturnType<typeof intervention.wait>>;
+        try {
+          // A browser the operator closes, or a policy violation they trigger, ends the wait early.
+          const watchdog = (async (): Promise<never> => {
+            while (waiting) {
+              await delay(250);
+              if (!waiting) break;
+              try { surface!.health(); } catch (error) { await broker.close(intervention.id); throw error; }
+            }
+            return new Promise<never>(() => {});
+          })();
+          resolution = await Promise.race([intervention.wait(hitl!.maxWaitMs), watchdog]);
+        } finally {
+          waiting = false;
+          const paused = Date.now() - pausedAt;
+          deadline += paused;
+          if (!controller.signal.aborted) timer = setTimeout(() => abort('RUN_TIMEOUT'), Math.max(1, deadline - Date.now()));
+        }
+        await event({ type: 'intervention_closed', stepId, outcome: resolution.kind,
+          ...(resolution.kind === 'resumed' ? { action: resolution.action } : {}) });
+        try { await bounded(() => sink!.intervention(intervention.record()), 5000, 'EVIDENCE_ERROR'); }
+        catch { evidenceFailed = true; }
+        check();
+        surface!.health();
+        if (resolution.kind === 'expired') throw new DiscoveryError('NEEDS_HUMAN');
+        if (resolution.kind === 'aborted') throw new DiscoveryError('ABORTED_BY_OPERATOR');
+        // Whatever the person did, earlier reads no longer describe the page the model will see.
+        receipts.length = 0;
+        submitted = new Set();
+      }
       await ui(() => active.authenticate(credentials));
       let consecutiveErrors = 0;
       let previousFingerprint = '';
@@ -245,10 +352,17 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
           observation = await ui(() => active.observe());
         } catch (error) {
           const failure = errorCode(error);
+          if (humanEligible(error)) {
+            // A dialog the model never asked for: a person clears it, then the model re-plans from a fresh observation.
+            await handoff(failure);
+            records.push({ turn: turns, tool: 'request_human', reason: 'ask_human', status: 'blocked', code: 'HUMAN_RESUMED' });
+            consecutiveErrors = 0; repeated = 0; previousFingerprint = '';
+            continue;
+          }
           if (retryable.has(failure) && ++consecutiveErrors < 3) continue;
           throw error;
         }
-        if (observation.path === '/login') throw new DiscoveryError('SESSION_REQUIRED');
+        if (observation.path === loginPath) throw new DiscoveryError('SESSION_REQUIRED');
         const controls = observation.controls.map(({ target, ref, tag, label, text, framePath, enabled, inputType, href, truncated, options }) => {
           const cell = target.strategies.find((strategy) => strategy.kind === 'table_cell');
           const semantic = (value: { source: string; value?: string } | number) =>
@@ -259,16 +373,16 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
             ...(cell ? { row: semantic(cell.row), column: semantic(cell.column) } : {}) };
         });
         const context = {
-          goal, inputs: { memberId }, observation: { path: observation.path, truncated: observation.truncated, controls },
-          actions: records.slice(-5).map(({ turn, tool, reason, status, code, field }) =>
-            ({ turn, tool, reason, status, ...(code ? { code } : {}), ...(field ? { field } : {}) })),
-          extracted: [...receipts.values()].map(({ field, scope }) => ({ field, scope })),
+          goal, contract: spec, observation: { path: observation.path, truncated: observation.truncated, controls },
+          actions: records.slice(-5).map(({ turn, tool, reason, status, code, name }) =>
+            ({ turn, tool, reason, status, ...(code ? { code } : {}), ...(name ? { name } : {}) })),
+          extracted: receipts.map(({ name, kind, framePath }) => ({ name, kind, framePath })),
         };
         const serialized = JSON.stringify(context, (_key, value: unknown) => typeof value === 'string' ? guard.redact(value) : value);
         if (serialized.length > 60_000) throw new DiscoveryError('CONTEXT_LIMIT');
-        const choice = await call('action', (signal) => model.decide(JSON.parse(serialized) as unknown, signal));
+        const choice = await call('action', (signal) => model.decide(spec!, JSON.parse(serialized) as unknown, signal));
         let decision;
-        try { decision = parseDecision(choice?.tool, choice?.input); }
+        try { decision = parseDecision(schemas, choice?.tool, choice?.input); }
         catch {
           budget();
           if (++consecutiveErrors < 3) continue;
@@ -296,37 +410,44 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
           await event({ type: 'decision_selected', phase: 'action', action: decision.tool });
           const receipt = await ui(async (): Promise<Partial<DiscoveryRecord>> => {
             switch (decision.tool) {
-              case 'fill':
+              case 'fill': {
+                const captured = await active.capture(decision.input.ref);
+                check();
+                if (captured.effect.kind !== 'input') throw new DiscoveryError('FIELD_MISMATCH');
+                receipts.length = 0;
+                await active.act(decision.input.ref, 'fill', bindings[decision.input.input]);
+                return { ref: decision.input.ref, target: captured.target, effect: 'input', path: observation.path,
+                  framePath: captured.framePath, value: { source: 'input', name: decision.input.input } };
+              }
               case 'click': {
                 const captured = await active.capture(decision.input.ref);
                 check();
-                if (decision.tool === 'fill' && captured.targetKey !== 'member_id') throw new DiscoveryError('FIELD_MISMATCH');
-                if (decision.tool === 'click' && captured.targetKey === 'search_member'
-                  && captured.formValues.memberId !== memberId) throw new DiscoveryError('WRONG_MEMBER');
-                if (!captured.targetKey) throw new DiscoveryError('POLICY_BLOCKED');
-                receipts.clear();
-                submittedMember = undefined;
-                await active.act(decision.input.ref, decision.tool, decision.tool === 'fill' ? memberId : undefined);
-                if (decision.tool === 'click' && captured.targetKey === 'search_member') submittedMember = memberId;
-                return { ref: decision.input.ref, target: captured.target, targetKey: captured.targetKey,
-                  path: observation.path, framePath: captured.framePath,
-                  ...(decision.tool === 'fill' ? { value: { source: 'input', name: 'memberId' } as const } : {}) };
+                if (captured.effect.kind !== 'navigate' && captured.effect.kind !== 'submit') throw new DiscoveryError('POLICY_BLOCKED');
+                receipts.length = 0;
+                submitted = new Set();
+                await active.act(decision.input.ref, 'click');
+                if (captured.effect.kind === 'submit') {
+                  const carried = Object.values(captured.formValues);
+                  submitted = new Set(Object.entries(bindings).filter(([, value]) => carried.includes(value)).map(([name]) => name));
+                }
+                return { ref: decision.input.ref, target: captured.target, effect: captured.effect.kind,
+                  path: observation.path, framePath: captured.framePath };
               }
               case 'extract': {
-                const read = await readGoalField(active, decision.input.ref, decision.input.field, memberId!);
+                const read = await readDeclared(active, spec!, decision.input.ref, decision.input.name);
                 sensitive.add(read.raw); sensitive.add(String(read.value));
-                receipts.set(`${read.evidence.field}:${read.evidence.scope}`, read.evidence);
-                return { ref: decision.input.ref, target: read.evidence.target, targetKey: read.evidence.targetKey,
-                  path: observation.path, framePath: read.evidence.framePath, field: read.evidence.field };
+                receipts.push(read.evidence);
+                return { ref: decision.input.ref, target: read.evidence.target, effect: 'read',
+                  path: observation.path, framePath: read.evidence.framePath, name: read.evidence.name };
               }
               case 'navigate': {
                 const current = await active.observe();
-                if (current.path === '/login') throw new DiscoveryError('SESSION_REQUIRED');
+                if (current.path === loginPath) throw new DiscoveryError('SESSION_REQUIRED');
                 if (decision.input.path !== current.path && !current.controls.some((control) => control.href === decision.input.path)) {
                   throw new DiscoveryError('UNOBSERVED_NAVIGATION');
                 }
-                receipts.clear();
-                submittedMember = undefined;
+                receipts.length = 0;
+                submitted = new Set();
                 await active.navigate(decision.input.path);
                 return { path: decision.input.path };
               }
@@ -335,17 +456,16 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
                 return { ms: decision.input.ms };
               case 'complete':
                 if (decision.input.outcome === 'success') {
-                  outputs = await verifyBalanceCompletion(active, [...receipts.values()], memberId!);
+                  outputs = await verifySuccess(active, spec!, receipts);
                   active.health();
-                  sensitive.add(String(outputs.savingsBalanceCents));
+                  for (const value of Object.values(outputs)) sensitive.add(String(value));
                   code = 'COMPLETED';
                   return {};
                 } else {
-                  const captured = await active.capture(decision.input.ref!);
-                  code = await verifyBusinessOutcome(active, decision.input.ref!, decision.input.outcome, submittedMember, memberId!);
+                  const captured = await verifyBusinessOutcome(active, spec!, decision.input.ref!, submitted);
                   active.health();
-                  return { ref: decision.input.ref!, target: captured.target, outcome: decision.input.outcome,
-                    ...(captured.targetKey ? { targetKey: captured.targetKey } : {}),
+                  code = decision.input.code!;
+                  return { ref: decision.input.ref!, target: captured.target, outcome: decision.input.code!,
                     path: observation.path, framePath: captured.framePath };
                 }
               case 'request_human': throw new DiscoveryError('HUMAN_REQUIRED');
@@ -359,6 +479,13 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
           // A failed dispatch is not a receipt, even if its proposal was structurally valid.
           records[records.length - 1] = { turn: turns, tool: decision.tool, reason: decision.input.reason,
             status: blocked.has(failure) ? 'blocked' : 'rejected', code: failure };
+          if (humanEligible(error)) {
+            await handoff(failure);
+            // The transcript keeps the mark: a human-assisted run answers the goal but is never compiled.
+            records[records.length - 1]!.code = 'HUMAN_RESUMED';
+            consecutiveErrors = 0; repeated = 0; previousFingerprint = '';
+            continue;
+          }
           if (retryable.has(failure) && ++consecutiveErrors < 3) continue;
           throw error;
         }
@@ -402,9 +529,12 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
     if (sink && metadata) {
       try {
         transcriptFile = await writeTranscript(sink.directory, {
-          schemaVersion: 1, kind: 'discovery_transcript', source, ...metadata, runId, promptVersion: PROMPT_VERSION,
-          goalType: 'member_savings_balance', inputNames: ['memberId'], status: kind, calls, records,
-        } satisfies DiscoveryTranscript, { inputs: memberId ? { memberId } : {}, secrets, sensitiveValues: [...sensitive] });
+          schemaVersion: 2, kind: 'discovery_transcript', source, ...metadata, runId, promptVersion: PROMPT_VERSION,
+          goal: spec ? transcriptGoal(spec) : null, status: kind, calls, records,
+        } satisfies DiscoveryTranscript, {
+          inputs: spec ? inputValues(spec) : {}, secrets, sensitiveValues: [...sensitive],
+          canonicalPath: (path) => canonicalPagePath(options.policy, `${options.origin}${path}`, [...sensitive]),
+        });
       } catch (error) {
         kind = 'FAILURE'; outputs = undefined;
         code = error instanceof Error && error.message === 'TRANSCRIPT_UNSAFE' ? 'TRANSCRIPT_UNSAFE' : 'TRANSCRIPT_WRITE_FAILED';
@@ -417,5 +547,6 @@ export async function runDiscovery(options: Options): Promise<DiscoveryResult> {
   }
   return discoveryResultSchema.parse({ kind, runId, code, source, turns, usage, usageComplete: calls.every((call) => call.usage !== null),
     evidence: [...(sink?.files ?? []), ...(transcriptFile ? [transcriptFile] : [])],
+    ...(spec ? { goal: spec } : {}),
     ...(kind === 'SUCCESS' ? { outputs } : {}) });
 }

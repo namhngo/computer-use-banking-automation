@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { targetSchema } from '../artifact/schema.js';
+import { identifierSchema, targetSchema } from '../artifact/schema.js';
 import { transcriptSchema } from './contracts.js';
 import { createSecretGuard } from './privacy.js';
 
@@ -30,54 +30,65 @@ export async function readTranscriptFile(path: string): Promise<unknown> {
 export async function writeTranscript(
   directory: string,
   transcript: unknown,
-  options: { inputs: { memberId?: string }; secrets: readonly string[]; sensitiveValues?: readonly string[] },
+  options: {
+    /** Declared input values by name. Any literal equal to one becomes an `input` binding. */
+    inputs: Record<string, string>;
+    secrets: readonly string[];
+    sensitiveValues?: readonly string[];
+    /** Policy-driven spelling of a path for evidence (identifiers -> `:id`, unknown -> `[unavailable]`). */
+    canonicalPath: (path: string) => string;
+  },
 ): Promise<'discovery.json'> {
   let content: string;
   try {
     const parsed = transcriptSchema.parse(transcript);
-    const { memberId } = options.inputs;
-    if ((memberId !== undefined && !/^[0-9]{5}$/.test(memberId))
-      || (memberId === undefined && (parsed.records.length > 0 || parsed.status === 'SUCCESS'
-        || parsed.calls.some((call) => call.phase !== 'intent' || call.turn !== 0)))) throw new Error();
-    const guard = createSecretGuard([...(memberId ? [memberId] : []), ...options.secrets, ...(options.sensitiveValues ?? [])]);
-    const paths = new Set([
-      '/', '/login', '/members/search', '/members/:memberId',
-      '/members/:memberId/accounts', '/notice', '[unavailable]', '[blocked]',
-    ]);
+    const inputs = Object.entries(options.inputs);
+    if (inputs.some(([name, value]) => !identifierSchema.safeParse(name).success || typeof value !== 'string' || value.length === 0 || value.length > 200)
+      || (parsed.goal === null && (inputs.length > 0 || parsed.records.length > 0 || parsed.status === 'SUCCESS'
+        || parsed.calls.some((call) => call.phase !== 'intent' || call.turn !== 0)))
+      || (parsed.goal !== null && Object.keys(parsed.goal.inputs).sort().join(',') !== inputs.map(([name]) => name).sort().join(','))) throw new Error();
+    const declared = new Set(parsed.goal ? [...Object.keys(parsed.goal.inputs), ...Object.keys(parsed.goal.outputs)] : []);
+    const guard = createSecretGuard([...inputs.map(([, value]) => value), ...options.secrets, ...(options.sensitiveValues ?? [])]);
+    const byValue = new Map(inputs.map(([name, value]) => [value, name]));
 
     function parameterize(value: unknown): unknown {
       if (Array.isArray(value)) return value.map(parameterize);
       if (value === null || typeof value !== 'object') return value;
       const object = value as Record<string, unknown>;
-      if (memberId !== undefined && object.source === 'literal' && object.value === memberId) return { source: 'input', name: 'memberId' };
-      if (object.source === 'input' && object.name !== 'memberId') throw new Error();
+      if (object.source === 'literal' && typeof object.value === 'string' && byValue.has(object.value)) return { source: 'input', name: byValue.get(object.value) };
+      if (object.source === 'input' && !(typeof object.name === 'string' && object.name in options.inputs)) throw new Error();
       return Object.fromEntries(Object.entries(object).map(([key, child]) => [key, parameterize(child)]));
     }
 
     for (const record of parsed.records) {
       // The dispatcher must omit proposals on failure; status is not proof of dispatch here.
-      if (record.status !== 'succeeded' && [record.target, record.targetKey, record.value, record.path, record.framePath]
+      if (record.status !== 'succeeded' && [record.target, record.effect, record.value, record.path, record.framePath]
         .some((value) => value !== undefined)) throw new Error();
+      if (record.name !== undefined && (record.tool !== 'extract' || !declared.has(record.name))) throw new Error();
       if (record.target) record.target = targetSchema.parse(parameterize(record.target));
       if (record.value) {
         if (record.tool !== 'fill') throw new Error();
-        if (record.value.source === 'literal' && record.value.value === memberId) {
-          record.value = { source: 'input', name: 'memberId' };
+        if (record.value.source === 'literal' && byValue.has(record.value.value)) {
+          record.value = { source: 'input', name: byValue.get(record.value.value)! };
         }
-        if (record.value.source !== 'input' || record.value.name !== 'memberId') throw new Error();
+        if (record.value.source !== 'input' || !(record.value.name in options.inputs)) throw new Error();
       }
       for (const key of ['path', 'framePath'] as const) {
         const path = record[key];
         if (path === undefined) continue;
-        const canonical = path.replace(/^\/members\/([0-9]+)(?=\/|$)/, (_match, segment: string) => {
-          if (segment !== memberId) throw new Error();
-          return '/members/:memberId';
-        });
-        if (!paths.has(canonical)) throw new Error();
+        // Only a plain pathname is ever recorded; anything with a query, fragment or escape is refused, not trimmed.
+        if (!/^\/(?:[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*)?$/.test(path)) throw new Error();
+        const canonical = options.canonicalPath(path);
+        if (canonical === '[unavailable]' || canonical === '[blocked]') throw new Error();
         record[key] = canonical;
       }
     }
 
+    // A description may echo the user's words; the value itself never reaches disk.
+    if (parsed.goal) {
+      parsed.goal.description = guard.redact(parsed.goal.description);
+      for (const field of [...Object.values(parsed.goal.inputs), ...Object.values(parsed.goal.outputs)]) field.description = guard.redact(field.description);
+    }
     function checkStrings(value: unknown): void {
       if (typeof value === 'string') {
         if (guard.contains(value)) throw new Error();

@@ -132,7 +132,7 @@ describe('state machine', () => {
 
   it('rejects malformed opens, double opens, bad operators, unknown ids, and bad wait budgets', async () => {
     const broker = new InterventionBroker(token);
-    expect(() => broker.open({ ...input, path: '/anything' }, hooks().record)).toThrow('Invalid intervention');
+    expect(() => broker.open({ ...input, path: '/members/12345' }, hooks().record)).toThrow('Invalid intervention');
     expect(() => broker.open({ ...input, stepId: 'not valid' }, hooks().record)).toThrow('Invalid intervention');
     const intervention = broker.open(input, hooks().record);
     expect(() => broker.open(input, hooks().record)).toThrow('already open');
@@ -148,14 +148,14 @@ describe('state machine', () => {
     const broker = new InterventionBroker(token);
     const intervention = broker.open(input, hooks().record);
     void intervention.wait(60_000);
-    broker.recordHumanAction(intervention.id, { action: 'click', outcome: 'recorded', path: '/notice' });
+    broker.recordHumanAction(intervention.id, { action: 'click', effect: 'read', outcome: 'recorded', path: '/notice' });
     expect(intervention.record().humanActions).toEqual([]);
     await broker.claim(intervention.id, 'alice');
-    broker.recordHumanAction(intervention.id, { action: 'submit', targetKey: 'operator_notice_acknowledge', outcome: 'allowed', path: '/notice' });
-    broker.recordHumanAction(intervention.id, { action: 'submit', outcome: 'blocked', path: 'http://evil.example/steal?x=1' });
-    broker.recordHumanAction(intervention.id, { action: 'typed value: 12345', outcome: 'recorded', path: '/notice' });
+    broker.recordHumanAction(intervention.id, { action: 'submit', effect: 'submit', outcome: 'allowed', path: '/notice' });
+    broker.recordHumanAction(intervention.id, { action: 'submit', effect: 'submit', outcome: 'blocked', path: 'http://evil.example/steal?x=1' });
+    broker.recordHumanAction(intervention.id, { action: 'typed value: 12345', effect: 'read', outcome: 'recorded', path: '/notice' });
     expect(intervention.record().humanActions).toEqual([
-      expect.objectContaining({ action: 'submit', targetKey: 'operator_notice_acknowledge', outcome: 'allowed', path: '/notice' }),
+      expect.objectContaining({ action: 'submit', effect: 'submit', outcome: 'allowed', path: '/notice' }),
     ]);
     expect(broker.list()[0]).not.toHaveProperty('humanActions');
     expect(JSON.stringify(broker.list())).not.toContain(token);

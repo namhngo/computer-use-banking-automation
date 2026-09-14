@@ -5,7 +5,6 @@ import { discoveryResultSchema, usageSchema } from '../discovery/contracts.js';
 import type { ModelReply } from '../discovery/contracts.js';
 
 const identifier = identifierSchema;
-const memberIdSchema = z.string().regex(/^[0-9]{5}$/);
 
 /**
  * What the router model sees: the compatible catalog, nothing about the UI. Descriptions come
@@ -32,14 +31,15 @@ export const routeToolSchemas = {
   }),
   discover: z.strictObject({
     reason: z.literal('no_compatible_capability'),
-    inputs: z.strictObject({ memberId: memberIdSchema }),
+    /** Identifiers written explicitly in the goal, copied verbatim. Discovery re-derives its own contract. */
+    inputs: z.record(identifier, z.string().min(1).max(200)).refine((inputs) => Object.keys(inputs).length <= 8),
   }),
   clarify: z.strictObject({
-    reason: z.enum(['missing_member_id', 'ambiguous_member_id', 'ambiguous_goal']),
+    reason: z.enum(['missing_input', 'ambiguous_input', 'ambiguous_goal']),
     question: z.string().min(1).max(300),
   }),
   unsupported: z.strictObject({
-    reason: z.enum(['changes_financial_data', 'outside_supported_goals', 'unsafe_request']),
+    reason: z.enum(['changes_data', 'not_a_read', 'unsafe_request']),
   }),
 };
 export type RouteTool = keyof typeof routeToolSchemas;

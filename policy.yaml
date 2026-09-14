@@ -1,53 +1,39 @@
-# Trusted app-owned policy. Pure decisions only; browser enforcement is separate.
-# targetKey identities come from the trusted adapter/app profile, never the model.
-schemaVersion: 1
+# Trusted, app-owned policy for the Harbor Core sandbox. Pure decisions; browser enforcement is separate.
+#
+# Nothing here is about a goal. It describes the application surface: which pages may be loaded,
+# which forms may be submitted (matched by POST path and exact field set on the real DOM), how a
+# session is opened, and which interstitial dialogs are benign. Reading visible text on an allowed
+# page is always read-only. Everything not listed is denied: script-only buttons, downloads,
+# popups, other origins, and any form the page grows later (e.g. "Open sub-account").
+schemaVersion: 2
 defaultEffect: deny
 appId: harbor_core
 appVersion: '1.0'
 allowedOrigins:
   - http://localhost:4000
   - http://127.0.0.1:4000
-requests:
-  - { method: GET, path: / }
-  - { method: GET, path: /login, query: { reason: [expired] } }
-  - { method: GET, path: /members/search }
-  - { method: GET, path: '/members/:memberId' }
-  - { method: GET, path: '/members/:memberId/accounts' }
-  - { method: GET, path: /notice }
-  - { method: POST, path: /login }
-  - { method: POST, path: /members/search }
-  - { method: POST, path: /notice }
-  - { method: POST, path: /logout }
-actions:
-  - { action: navigate, path: /, risk: read_only }
-  - { action: navigate, path: /login, risk: read_only }
-  - { action: navigate, path: /members/search, risk: read_only }
-  - { action: navigate, path: '/members/:memberId', risk: read_only }
-  - { action: navigate, path: '/members/:memberId/accounts', risk: read_only }
-  - { action: navigate, path: /notice, risk: read_only }
-  - { action: wait, path: /, risk: read_only }
-  - { action: wait, path: /login, risk: read_only }
-  - { action: wait, path: /members/search, risk: read_only }
-  - { action: wait, path: '/members/:memberId', risk: read_only }
-  - { action: wait, path: '/members/:memberId/accounts', risk: read_only }
-  - { action: wait, path: /notice, risk: read_only }
-  # Session credentials are filled at runtime, never stored in this policy.
-  - { action: fill, path: /login, targetKey: login_operator, risk: reversible }
-  - { action: fill, path: /login, targetKey: login_password, risk: reversible }
-  - { action: click, path: /login, targetKey: sign_in, risk: reversible }
-  - { action: click, path: /members/search, targetKey: sign_out, risk: reversible }
-  - { action: fill, path: /members/search, targetKey: member_id, risk: read_only }
-  - { action: click, path: /members/search, targetKey: search_member, risk: read_only }
-  - { action: click, path: /members/search, targetKey: view_member, risk: read_only }
-  - { action: click, path: '/members/:memberId', targetKey: back_to_member_search, risk: read_only }
-  - { action: extract, path: '/members/:memberId', targetKey: member_identity, risk: read_only }
-  - { action: extract, path: '/members/:memberId/accounts', targetKey: member_identity, risk: read_only }
-  - { action: extract, path: '/members/:memberId/accounts', targetKey: savings_balance, risk: read_only }
-  - { action: extract, path: '/members/:memberId/accounts', targetKey: currency, risk: read_only }
-  # Both dialogs POST /notice, but only the recognized system notice is authorized.
-  - { action: click, path: /notice, targetKey: system_notice_ok, risk: reversible }
-# Form submissions an operator may make after a same-session handoff. Automation never gets
-# these; the operator never gets more than these. GET navigation stays governed by `requests`.
-humanActions:
-  - { action: click, path: /notice, targetKey: operator_notice_acknowledge, risk: reversible }
+# Session credentials are filled at runtime from the environment, never stored in this policy.
+session:
+  loginPath: /login
+  fields: { username: Operator ID, password: Password }
+  submit: Sign in
+  banner: Harbor Core v1.0
+# ':id' matches one opaque record-identifier segment. It is also how identifiers are spelled in evidence.
+pages:
+  - { path: / }
+  - { path: /login, query: { reason: [expired] } }
+  - { path: /members/search }
+  - { path: '/members/:id' }
+  - { path: '/members/:id/accounts' }
+  - { path: /notice }
+forms:
+  - { path: /login, fields: [username, password], risk: reversible }
+  - { path: /logout, fields: [], risk: reversible }
+  - { path: /members/search, fields: [memberId], risk: read_only }
+  - { path: /notice, fields: [], risk: reversible }
+# Forms an operator may submit after a same-session handoff, in addition to the automation forms.
+humanForms: []
+# Automation may act through this interstitial. Any other dialog pauses automation for a person.
+knownDialogs:
+  - System notice
 irreversibleActions: block

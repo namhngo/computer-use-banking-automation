@@ -6,14 +6,16 @@ import type { CapabilityArtifact, CapabilityKey } from '../artifact/schema.js';
 import { compileTranscript, CompileError } from '../compiler/compile.js';
 import { verifyDraft } from '../compiler/verify.js';
 import type { VerificationTarget } from '../compiler/verify.js';
+import { inputValues } from '../discovery/acceptance.js';
 import { ModelCallError } from '../discovery/contracts.js';
 import type { DiscoveryResult } from '../discovery/contracts.js';
 import { runDiscovery } from '../discovery/engine.js';
 import type { DiscoveryModel } from '../discovery/model.js';
 import { readTranscriptFile } from '../discovery/transcript.js';
+import type { InterventionBroker } from '../hitl/interventions.js';
+import { policyApp } from '../policy/policy.js';
 import type { Policy } from '../policy/policy.js';
 import { runReplay } from '../replay/engine.js';
-import { harborApp } from '../surface/harbor-profile.js';
 import { agentResultSchema, catalogEntrySchema } from './contracts.js';
 import type { AgentResult, CatalogEntry, RouterModel } from './contracts.js';
 
@@ -39,8 +41,14 @@ export type AgentOptions = {
   evidenceRoot?: string;
   headless?: boolean;
   discoveryLimits?: { maxSteps?: number; maxDurationMs?: number; modelTimeoutMs?: number; maxTokens?: number };
-  /** Fresh sandboxes for verification plus extra distinct inputs. Absent → drafts stay drafts. */
+  /**
+   * Fresh sandboxes for verification plus extra distinct inputs. Absent → drafts stay drafts.
+   * Extra inputs may be keyed by the names the discovery contract ends up using, or given as
+   * bare values that are matched to the contract's inputs in declaration order.
+   */
   verification?: { createTarget: () => Promise<VerificationTarget>; inputs: Record<string, string>[] };
+  /** Same-session human handoff, offered to both discovery and replay. */
+  hitl?: { broker: InterventionBroker; maxWaitMs: number };
   routeTimeoutMs?: number;
   now?: () => Date;
 };
@@ -54,14 +62,12 @@ const optionsSchema = z.object({
   routeTimeoutMs: z.number().int().min(1000).max(120_000).default(30_000),
 });
 
-export const CAPABILITY_NAME = 'get_member_savings_balance';
-
 /** Verified capabilities for the configured app, newest revision per name, as the model sees them. */
-export function buildCatalog(artifacts: readonly CapabilityArtifact[]): CatalogEntry[] {
+export function buildCatalog(artifacts: readonly CapabilityArtifact[], app: { appId: string; appVersion: string }): CatalogEntry[] {
   const newest = new Map<string, CapabilityArtifact>();
   for (const artifact of artifacts) {
     if (artifact.identity.status !== 'verified' || !artifact.verification) continue;
-    if (artifact.app.appId !== harborApp.appId || artifact.app.appVersion !== harborApp.appVersion) continue;
+    if (artifact.app.appId !== app.appId || artifact.app.appVersion !== app.appVersion) continue;
     const current = newest.get(artifact.identity.name);
     if (!current || current.identity.version < artifact.identity.version) newest.set(artifact.identity.name, artifact);
   }
@@ -89,11 +95,13 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const passthrough = {
     ...(evidenceRoot === undefined ? {} : { evidenceRoot }),
     ...(headless === undefined ? {} : { headless }),
+    ...(options.hitl === undefined ? {} : { hitl: options.hitl }),
   };
+  const app = policyApp(options.policy);
 
   let catalog: CatalogEntry[];
   try {
-    catalog = buildCatalog(await options.registry.list(harborApp));
+    catalog = buildCatalog(await options.registry.list(app), app);
   } catch {
     return finish({ kind: 'FAILURE', code: 'REGISTRY_ERROR' });
   }
@@ -123,7 +131,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     // The model names a catalog entry; the application decides whether it exists and validates the inputs.
     const entry = catalog.find((candidate) => candidate.name === route.input.capability && candidate.version === route.input.version);
     if (!entry) return finish({ kind: 'FAILURE', code: 'CAPABILITY_NOT_FOUND' });
-    const capability: CapabilityKey = { ...harborApp, name: entry.name, version: entry.version };
+    const capability: CapabilityKey = { ...app, name: entry.name, version: entry.version };
     let artifact: CapabilityArtifact;
     try {
       artifact = await options.registry.load(capability);
@@ -146,15 +154,25 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
   // Compile what the model actually did, save the draft, and prove it in fresh sandboxes. The goal
   // itself is already complete: the discovery result carries the outputs and nothing runs again.
-  const verificationInputs = [route.input.inputs, ...(options.verification?.inputs ?? [])]
+  const contract = discovery.goal!;
+  const names = Object.keys(contract.inputs);
+  const conform = (values: Record<string, string>): Record<string, string> | undefined => {
+    const keys = Object.keys(values);
+    if (keys.length !== names.length) return undefined;
+    if (names.every((name) => name in values)) return Object.fromEntries(names.map((name) => [name, values[name]!]));
+    return Object.fromEntries(names.map((name, index) => [name, Object.values(values)[index]!]));
+  };
+  const verificationInputs = [inputValues(contract), ...(options.verification?.inputs ?? []).map(conform)]
+    .filter((values): values is Record<string, string> => values !== undefined)
     .filter((values, index, all) => all.findIndex((other) => JSON.stringify(other) === JSON.stringify(values)) === index);
-  const sensitiveValues = [credentials.username, credentials.password, ...verificationInputs.flatMap((values) => Object.values(values))];
+  const sensitiveValues = [credentials.username, credentials.password, ...verificationInputs.flatMap((values) => Object.values(values)),
+    ...Object.values(route.input.inputs)];
   try {
-    const existing = await options.registry.list(harborApp);
-    const version = existing.filter((artifact) => artifact.identity.name === CAPABILITY_NAME)
+    const existing = await options.registry.list(app);
+    const version = existing.filter((artifact) => artifact.identity.name === contract.name)
       .reduce((max, artifact) => Math.max(max, artifact.identity.version), 0) + 1;
     const transcript = await readTranscriptFile(join(evidenceRoot ?? 'artifacts/runs', discovery.runId, 'discovery.json'));
-    const draft = compileTranscript(transcript, { name: CAPABILITY_NAME, version, app: harborApp, recordedAt: now().toISOString(), sensitiveValues });
+    const draft = compileTranscript(transcript, { name: contract.name, version, app, recordedAt: now().toISOString(), sensitiveValues });
     if (!options.verification) {
       const saved = await options.registry.save(draft, sensitiveValues);
       return finish({ kind: 'DISCOVERED', discovery, compiled: { draft: saved, verified: null, code: 'VERIFICATION_UNAVAILABLE', verificationRuns: [] } });

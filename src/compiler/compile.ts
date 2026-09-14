@@ -24,29 +24,32 @@ type GoalContract = {
   description: string;
   inputs: Record<string, FieldDefinition>;
   outputs: Record<string, { field: FieldDefinition; parser: ExtractionParser }>;
-  /** Extract fields that verify identity rather than produce outputs; each must equal the named input. */
-  identity: Record<string, string>;
-  outcomes: Record<string, string>;
 };
 
-/** Typed contract per supported goal family. The compiler knows shapes, never UI order or selectors. */
-const goalContracts: Record<DiscoveryTranscript['goalType'], GoalContract> = {
-  member_savings_balance: {
-    description: 'Find a member by ID and return the savings balance in integer US cents with its currency. Discovered from a live UI session; steps and locators were captured at dispatch time.',
-    inputs: {
-      memberId: { type: 'string', format: 'digits', minLength: 5, maxLength: 5, sensitive: true,
-        description: 'Member identifier supplied per invocation; preserve leading zeroes.' },
-    },
-    outputs: {
-      savingsBalanceCents: { parser: 'usd_cents', field: { type: 'number', integer: true, sensitive: true,
-        description: 'Savings balance in integer cents, parsed from the displayed USD amount.' } },
-      currency: { parser: 'text', field: { type: 'string', format: 'text', minLength: 3, maxLength: 3, sensitive: false,
-        description: 'Currency code displayed for the savings account.' } },
-    },
-    identity: { memberId: 'memberId' },
-    outcomes: { member_not_found: 'MEMBER_NOT_FOUND', invalid_member_id: 'INVALID_MEMBER_ID' },
-  },
-};
+/**
+ * The capability contract is the GoalSpec the model declared and the engine verified, as
+ * recorded in the transcript. Shapes only: the compiler knows no UI order, selectors or app.
+ */
+function contractFromGoal(goal: NonNullable<DiscoveryTranscript['goal']>): GoalContract {
+  const typeOf = (parser: ExtractionParser): FieldDefinition['type'] => parser === 'text' ? 'string' : parser === 'boolean' ? 'boolean' : 'number';
+  return {
+    description: `${goal.description} Discovered from a live UI session; steps and locators were captured at dispatch time.`,
+    inputs: Object.fromEntries(Object.entries(goal.inputs).map(([name, input]) => [name, {
+      type: 'string', format: input.format, sensitive: true, description: input.description,
+      // A record identifier is expected at the width it was observed; free text is bounded, not fixed.
+      ...(input.format === 'digits' ? { minLength: input.length, maxLength: input.length } : { minLength: 1, maxLength: 200 }),
+    } satisfies FieldDefinition])),
+    outputs: Object.fromEntries(Object.entries(goal.outputs).map(([name, output]) => {
+      const type = typeOf(output.parser);
+      const field: FieldDefinition = type === 'string'
+        ? { type: 'string', format: 'text', minLength: 1, maxLength: 4096, sensitive: output.sensitive, description: output.description }
+        : type === 'number'
+          ? { type: 'number', integer: true, sensitive: output.sensitive, description: output.description }
+          : { type: 'boolean', sensitive: output.sensitive, description: output.description };
+      return [name, { parser: output.parser, field }];
+    })),
+  };
+}
 
 const optionsSchema = z.strictObject({
   name: identifierSchema,
@@ -60,7 +63,8 @@ const optionsSchema = z.strictObject({
 });
 export type CompileOptions = z.input<typeof optionsSchema>;
 
-const parameterPath = /^\/members\/:memberId(?:\/|$)/;
+/** A path that carries a record identifier cannot be a literal navigation step. */
+const parameterPath = /(?:^|\/):id(?:\/|$)/;
 
 function succeeded(records: readonly DiscoveryRecord[]): DiscoveryRecord[] {
   // The dispatcher records failed proposals without receipts; they had no effect and are not steps.
@@ -85,6 +89,15 @@ function derivePostcondition(next: DiscoveryRecord | undefined): Condition {
     : { kind: 'all', conditions: [{ kind: 'path_equals', path }, visible(next.target)] };
 }
 
+/** The identity of a capability independent of wording: name, input names/formats, output names/parsers. */
+function shape(goal: NonNullable<DiscoveryTranscript['goal']>) {
+  return {
+    name: goal.name,
+    inputs: Object.entries(goal.inputs).map(([name, input]) => [name, input.format]).sort(),
+    outputs: Object.entries(goal.outputs).map(([name, output]) => [name, output.parser]).sort(),
+  };
+}
+
 function stepId(prefix: string, turn: number): string {
   return `${prefix}_t${String(turn)}`;
 }
@@ -97,7 +110,12 @@ export function compileTranscript(transcriptInput: unknown, optionsInput: Compil
   if (!parsedTranscript.success) throw new CompileError('COMPILE_INVALID_TRANSCRIPT');
   const transcript = parsedTranscript.data;
   if (transcript.status !== 'SUCCESS') throw new CompileError('COMPILE_NOT_SUCCESSFUL');
-  const contract = goalContracts[transcript.goalType];
+  // A person acted in the browser mid-run. The model's steps alone did not reach the result, so
+  // they are not a replayable recipe; the answer stands, the artifact does not.
+  if (transcript.records.some((record) => record.code === 'HUMAN_RESUMED')) throw new CompileError('COMPILE_HUMAN_ASSISTED');
+  if (!transcript.goal) throw new CompileError('COMPILE_NOT_SUCCESSFUL');
+  const goal = transcript.goal;
+  const contract = contractFromGoal(goal);
 
   const dispatches = succeeded(transcript.records);
   if (dispatches.length === 0) throw new CompileError('COMPILE_NO_DISPATCHES');
@@ -108,7 +126,7 @@ export function compileTranscript(transcriptInput: unknown, optionsInput: Compil
   // at completion, so earlier reads of the same output are the only confirmed redundancy.
   const lastReadTurn = new Map<string, number>();
   for (const record of dispatches) {
-    if (record.tool === 'extract' && record.field && !(record.field in contract.identity)) lastReadTurn.set(record.field, record.turn);
+    if (record.tool === 'extract' && record.name && record.name in contract.outputs) lastReadTurn.set(record.name, record.turn);
   }
 
   const steps: Step[] = [];
@@ -136,18 +154,18 @@ export function compileTranscript(transcriptInput: unknown, optionsInput: Compil
         break;
       }
       case 'extract': {
-        if (!record.target || !record.field) throw new CompileError('COMPILE_MISSING_TARGET');
-        const inputName = contract.identity[record.field];
-        if (inputName !== undefined) {
-          const check: LeafCondition = { kind: 'text_equals', target: structuredClone(record.target), expected: { source: 'input', name: inputName } };
+        if (!record.target || !record.name) throw new CompileError('COMPILE_MISSING_TARGET');
+        if (record.name in goal.inputs) {
+          // Reading an input back is the identity checkpoint: the record on screen is the one asked for.
+          const check: LeafCondition = { kind: 'text_equals', target: structuredClone(record.target), expected: { source: 'input', name: record.name } };
           if (!identityChecks.some((existing) => JSON.stringify(existing) === JSON.stringify(check))) identityChecks.push(check);
           break;
         }
-        const output = contract.outputs[record.field];
+        const output = contract.outputs[record.name];
         if (!output) throw new CompileError('COMPILE_UNKNOWN_FIELD');
-        if (lastReadTurn.get(record.field) !== record.turn) break;
-        outputs[record.field] = output.field;
-        steps.push({ id: stepId('extract', record.turn), action: 'extract', risk: 'read_only', target: structuredClone(record.target), output: record.field, parser: output.parser });
+        if (lastReadTurn.get(record.name) !== record.turn) break;
+        outputs[record.name] = output.field;
+        steps.push({ id: stepId('extract', record.turn), action: 'extract', risk: 'read_only', target: structuredClone(record.target), output: record.name, parser: output.parser });
         break;
       }
       case 'wait':
@@ -168,10 +186,11 @@ export function compileTranscript(transcriptInput: unknown, optionsInput: Compil
     if (!parsed.success) throw new CompileError('COMPILE_INVALID_TRANSCRIPT');
     const evidence = parsed.data;
     const terminal = evidence.records.at(-1);
-    if (evidence.status !== 'BUSINESS_OUTCOME' || evidence.goalType !== transcript.goalType || terminal?.tool !== 'complete'
-      || terminal.status !== 'succeeded' || !terminal.target || !terminal.outcome) throw new CompileError('COMPILE_INVALID_OUTCOME');
-    const code = contract.outcomes[terminal.outcome];
-    if (!code || outcomes.some((outcome) => outcome.code === code)) throw new CompileError('COMPILE_INVALID_OUTCOME');
+    // An outcome transcript must describe the same capability: same name, inputs and outputs.
+    if (evidence.status !== 'BUSINESS_OUTCOME' || !evidence.goal || JSON.stringify(shape(evidence.goal)) !== JSON.stringify(shape(goal))
+      || terminal?.tool !== 'complete' || terminal.status !== 'succeeded' || !terminal.target || !terminal.outcome) throw new CompileError('COMPILE_INVALID_OUTCOME');
+    const code = terminal.outcome;
+    if (outcomes.some((outcome) => outcome.code === code)) throw new CompileError('COMPILE_INVALID_OUTCOME');
     outcomes.push({ code, when: visible(terminal.target), provenance: { source: 'observed', runId: evidence.runId } });
   }
 

@@ -157,8 +157,8 @@ it('hands the same browser session to an operator, records what they did, and re
     expect(kinds).toEqual(expect.arrayContaining(['intervention_opened', 'intervention_claimed', 'human_action', 'intervention_closed']));
     expect(kinds.indexOf('intervention_closed')).toBeLessThan(kinds.lastIndexOf('step_started'));
     expect(events.filter((event) => event.type === 'human_action')).toEqual([
-      expect.objectContaining({ action: 'click', targetKey: 'operator_notice_acknowledge', outcome: 'recorded', stepId: 'open_search' }),
-      expect.objectContaining({ action: 'submit', targetKey: 'operator_notice_acknowledge', outcome: 'allowed', stepId: 'open_search' }),
+      expect.objectContaining({ action: 'click', effect: 'submit', outcome: 'recorded', stepId: 'open_search' }),
+      expect.objectContaining({ action: 'submit', effect: 'submit', outcome: 'allowed', stepId: 'open_search' }),
     ]);
     expect(events.find((event) => event.type === 'intervention_closed')).toMatchObject({ outcome: 'resumed', action: 'retry_step' });
     const record = JSON.parse(files['intervention_1.json']!) as InterventionRecord;
@@ -204,30 +204,31 @@ it('blocks operator submissions the policy does not list for humans, then honour
     const intervention = await operator.waitForIntervention();
     expect((await operator.api('POST', `/interventions/${intervention.id}/claim`, { operatorId: 'dave' })).status).toBe(200);
     const live = page();
-    // Reads are fine (governed by the request allowlist); a sign-in POST is not a human action.
-    await live.goto(`${origin}/login`);
-    await live.getByLabel('Operator ID', { exact: true }).fill('someone');
-    await live.getByLabel('Password', { exact: true }).fill('secret-typed-by-human');
-    const before = count('POST', '/login');
-    await live.getByRole('button', { name: 'Sign in', exact: true }).click();
+    // Acknowledging the notice is a listed form; the operator may submit it.
+    await live.getByRole('button', { name: 'Acknowledge notice', exact: true }).click();
+    await live.waitForURL(`${origin}/members/search`);
+    expect(count('POST', '/notice')).toBe(1);
+    // Reads are fine (governed by the page allowlist); an unlisted form is not a human action either.
+    await live.goto(`${origin}/members/12345`);
+    const before = count('POST', '/members/12345/sub-accounts');
+    await live.getByRole('button', { name: 'Open sub-account', exact: true }).click();
     await delay(500);
-    expect(count('POST', '/login')).toBe(before);
-    expect(new URL(live.url()).pathname).toBe('/login');
+    expect(count('POST', '/members/12345/sub-accounts')).toBe(before);
+    expect(new URL(live.url()).pathname).toBe('/members/12345');
     expect(await operator.api('POST', `/interventions/${intervention.id}/resume`, { operatorId: 'dave', action: 'abort' }))
       .toMatchObject({ status: 200, json: { state: 'aborted' } });
     const result = await pending;
     expect(result).toMatchObject({ kind: 'FAILURE', code: 'ABORTED_BY_OPERATOR', atStep: 'open_search' });
-    expect(count('POST', '/notice')).toBe(0);
     const files = await evidence(result);
     const events = parseEvents(files['events.jsonl']!);
     expect(events.filter((event) => event.type === 'human_action' && event.action === 'submit')).toEqual([
-      expect.objectContaining({ targetKey: 'sign_in', outcome: 'blocked' }),
+      expect.objectContaining({ effect: 'submit', outcome: 'allowed' }),
+      expect.objectContaining({ effect: 'submit', outcome: 'blocked' }),
     ]);
     const record = JSON.parse(files['intervention_1.json']!) as InterventionRecord;
     expect(record.state).toBe('aborted');
-    expect(record.humanActions.some((action) => action.action === 'submit' && action.outcome === 'blocked' && action.path === '/login')).toBe(true);
-    expect(JSON.stringify(files)).not.toContain('secret-typed-by-human');
-    expect(JSON.stringify(files)).not.toContain('someone');
+    expect(record.humanActions.some((action) => action.action === 'submit' && action.outcome === 'blocked' && action.path === '/members/:id')).toBe(true);
+    expect(JSON.stringify(files)).not.toContain('12345');
   });
 }, 60_000);
 

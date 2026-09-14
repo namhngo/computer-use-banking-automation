@@ -99,7 +99,7 @@ it('uses the first matching fallback and reports its zero-based strategy index',
     expect(resolved.strategyIndex).toBe(1);
     await adapter.act(resolved.ref, 'fill', '12345');
     expect(await adapter.page.getByLabel('Member ID', { exact: true }).inputValue()).toBe('12345');
-    expect(events.at(-1)).toEqual({ type: 'action_authorized', action: 'fill', targetKey: 'member_id', strategyIndex: 1 });
+    expect(events.at(-1)).toEqual({ type: 'action_authorized', action: 'fill', effect: 'input', strategyIndex: 1 });
   });
 });
 
@@ -237,16 +237,16 @@ it('blocks forbidden paths and raw absolute, javascript, and data navigation URL
   }
 });
 
-it('allows filling the genuine password control but never authorizes its extraction', async () => {
+it('allows filling the genuine password control and reads back only its empty text, never its value', async () => {
   await withAdapter(async ({ adapter, count, events }) => {
     await adapter.navigate('/login');
     const target: Target = { strategies: [{ kind: 'label', text: { source: 'literal', value: 'Password' } }] };
     await adapter.act((await adapter.resolve(target, {})).ref, 'fill', credentials.password);
     expect(await adapter.page.getByLabel('Password', { exact: true }).inputValue()).toBe(credentials.password);
     const resolved = await adapter.resolve(target, {});
-    const before = events.length;
-    await expect(adapter.act(resolved.ref, 'extract')).rejects.toMatchObject({ code: 'POLICY_BLOCKED' });
-    expect(events).toHaveLength(before);
+    // Reading is textContent only: a control's typed value is not text and never crosses this boundary.
+    expect(await adapter.act(resolved.ref, 'extract')).toBe('');
+    expect(events.at(-1)).toEqual({ type: 'action_authorized', action: 'extract', effect: 'read', strategyIndex: 0 });
     expect(count('POST', '/login')).toBe(1);
   });
 });
@@ -278,6 +278,7 @@ it('automatically cancels an unknown native confirm and reports UNEXPECTED_DIALO
 it('revokes an action paused at authorization when a network violation closes the context', async () => {
   let release = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  let submits = 0;
   await withAdapter(async ({ adapter, count, events }) => {
     await adapter.act((await adapter.resolve(memberInput, {})).ref, 'fill', '12345');
     const resolved = await adapter.resolve(searchButton, {});
@@ -288,7 +289,7 @@ it('revokes an action paused at authorization when a network violation closes th
       () => ({ code: 'ACTION_COMPLETED' }), (error: unknown) => error,
     );
     try {
-      await expect.poll(() => events.some((event) => event.targetKey === 'search_member')).toBe(true);
+      await expect.poll(() => events.some((event) => event.effect === 'submit')).toBe(true);
       expect(count('POST', '/members/search')).toBe(0);
       // The mock CSP permits same-origin frames, so this reaches the proxy rather than being stopped by CSP.
       await adapter.page.evaluate(() => {
@@ -305,7 +306,7 @@ it('revokes an action paused at authorization when a network violation closes th
     expect(count('GET', '/members/12345/sub-accounts')).toBe(0);
     expect(count('POST', '/members/search')).toBe(0);
     expect(count('POST', '/logout')).toBe(0);
-  }, { onEvent: (event) => event.targetKey === 'search_member' ? gate : Promise.resolve() });
+  }, { onEvent: (event) => event.action === 'click' && event.effect === 'submit' && ++submits === 2 ? gate : Promise.resolve() });
 });
 
 it('makes a controlled-page HTTPS fetch fatal even though the proxy silently denies unmarked CONNECT', async () => {
@@ -365,6 +366,7 @@ it.each(['absent', 'wrong'] as const)('makes a controlled-page request with an %
 it('does not submit a changed form after an awaited authorization callback', async () => {
   let release = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  let submits = 0;
   await withAdapter(async ({ adapter, count, events }) => {
     await adapter.act((await adapter.resolve(memberInput, {})).ref, 'fill', '12345');
     const resolved = await adapter.resolve(searchButton, {});
@@ -372,23 +374,24 @@ it('does not submit a changed form after an awaited authorization callback', asy
       () => ({ code: 'ACTION_COMPLETED' }), (error: unknown) => error,
     );
     try {
-      await expect.poll(() => events.some((event) => event.targetKey === 'search_member')).toBe(true);
+      await expect.poll(() => events.some((event) => event.effect === 'submit')).toBe(true);
       await adapter.page.locator('form[action="/members/search"]').evaluate((element) => {
         element.setAttribute('action', '/logout');
         element.querySelector('button')!.textContent = 'Unclassified action';
       });
     } finally { release(); }
     expect(await pending).toHaveProperty('code', expect.stringMatching(/^(STALE_REF|POLICY_BLOCKED)$/));
-    expect(events.filter((event) => event.action === 'click' && event.targetKey !== 'sign_in'))
-      .toEqual([{ type: 'action_authorized', action: 'click', targetKey: 'search_member', strategyIndex: 0 }]);
+    expect(events.filter((event) => event.action === 'click').slice(1))
+      .toEqual([{ type: 'action_authorized', action: 'click', effect: 'submit', strategyIndex: 0 }]);
     expect(count('POST', '/logout')).toBe(0);
     expect(count('POST', '/members/search')).toBe(0);
-  }, { onEvent: (event) => event.targetKey === 'search_member' ? gate : Promise.resolve() });
+  }, { onEvent: (event) => event.action === 'click' && event.effect === 'submit' && ++submits === 2 ? gate : Promise.resolve() });
 });
 
 it('does not click a known notice whose ancestor identity changes during authorization', async () => {
   let release = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  let submits = 0;
   await withAdapter(async ({ adapter, count, events }) => {
     const dialog = adapter.page.getByRole('dialog', { name: 'System notice', exact: true });
     await dialog.evaluate((element) => {
@@ -402,7 +405,7 @@ it('does not click a known notice whose ancestor identity changes during authori
       () => ({ code: 'ACTION_COMPLETED' }), (error: unknown) => error,
     );
     try {
-      await expect.poll(() => events.some((event) => event.targetKey === 'system_notice_ok')).toBe(true);
+      await expect.poll(() => events.some((event) => event.effect === 'submit')).toBe(true);
       await dialog.evaluate((element) => element.setAttribute('aria-label', 'Unknown confirmation'));
       expect(await adapter.page.locator('form[action="/notice"]').evaluate((element) => element.outerHTML)).toBe(formBefore);
     } finally { release(); }
@@ -410,7 +413,7 @@ it('does not click a known notice whose ancestor identity changes during authori
     expect(count('POST', '/notice')).toBe(0);
     expect(count('POST', '/members/search')).toBe(0);
     expect(count('POST', '/logout')).toBe(0);
-  }, { fault: 'interstitial', onEvent: (event) => event.targetKey === 'system_notice_ok' ? gate : Promise.resolve() });
+  }, { fault: 'interstitial', onEvent: (event) => event.action === 'click' && event.effect === 'submit' && ++submits === 2 ? gate : Promise.resolve() });
 });
 
 it('requires a fresh target after a disabled Search becomes ready and submits it exactly once', async () => {
@@ -421,7 +424,8 @@ it('requires a fresh target after a disabled Search becomes ready and submits it
     await button.evaluate((element) => { (element as HTMLButtonElement).disabled = true; });
     await expect(adapter.resolve(searchButton, {})).rejects.toMatchObject({ code: 'TARGET_NOT_FOUND' });
     await expect(adapter.act(old.ref, 'click')).rejects.toMatchObject({ code: 'STALE_REF' });
-    expect(events.some((event) => event.targetKey === 'search_member')).toBe(false);
+    // The only submit so far is the sign-in click made during authentication.
+    expect(events.filter((event) => event.action === 'click' && event.effect === 'submit')).toHaveLength(1);
     expect(count('POST', '/members/search')).toBe(0);
     await button.evaluate((element) => { (element as HTMLButtonElement).disabled = false; });
     const fresh = await adapter.resolve(searchButton, {});
@@ -430,7 +434,7 @@ it('requires a fresh target after a disabled Search becomes ready and submits it
     expect(count('POST', '/members/search')).toBe(1);
     expect(count('POST', '/logout')).toBe(0);
     expect(await adapter.page.getByRole('link', { name: 'View member', exact: true }).getAttribute('href')).toBe('/members/12345');
-    expect(events.filter((event) => event.targetKey === 'search_member')).toHaveLength(1);
+    expect(events.filter((event) => event.effect === 'submit' && event.action === 'click')).toHaveLength(2);
     await expect(adapter.act(fresh.ref, 'click')).rejects.toMatchObject({ code: 'STALE_REF' });
     expect(count('POST', '/members/search')).toBe(1);
   });
@@ -474,7 +478,7 @@ it('returns only schema-safe snapshot metadata without raw text, credentials, me
       expect(await adapter.act(balance!.ref, 'extract')).toBe('$1,234.56');
       expect(JSON.stringify(runtime)).not.toContain('member-input-secret');
       const member = await adapter.snapshot();
-      expect(member.frames.map((frame) => frame.path)).toEqual(['/members/:memberId', '/members/:memberId/accounts']);
+      expect(member.frames.map((frame) => frame.path)).toEqual(['/members/:id', '/members/:id/accounts']);
       expect(member.frames[0]?.nodes).toContainEqual({
         tag: 'other', role: 'other', visible: true, childCount: 0, textPresent: true, valuePresent: false,
       });
@@ -502,7 +506,9 @@ it('returns only schema-safe snapshot metadata without raw text, credentials, me
   });
 });
 
-it('blocks extraction when the accounts iframe belongs to a different member than its parent', async () => {
+it('reads text in a swapped accounts iframe as plain read-only text; identity is proven by acceptance, not by the adapter', async () => {
+  // The adapter judges effects, not meaning: reading a cell is read-only wherever it is. Whether that
+  // cell belongs to the requested record is decided by the identity reads discovery and replay require.
   await withAdapter(async ({ adapter, events }) => {
     await adapter.navigate('/members/12345');
     await adapter.page.frameLocator('iframe[title="Member accounts"]').getByRole('table').waitFor();
@@ -514,9 +520,11 @@ it('blocks extraction when the accounts iframe belongs to a different member tha
     const resolved = await adapter.resolve({ scope: accountsScope, strategies: [
       { kind: 'table_cell', row: { source: 'literal', value: 'Savings' }, column: 3 },
     ] }, {});
-    const before = events.length;
-    await expect(adapter.act(resolved.ref, 'extract')).rejects.toMatchObject({ code: 'POLICY_BLOCKED' });
-    expect(events).toHaveLength(before);
+    expect(await adapter.act(resolved.ref, 'extract')).toBe('$9,876.54');
+    expect(events.at(-1)).toEqual({ type: 'action_authorized', action: 'extract', effect: 'read', strategyIndex: 0 });
+    // The frame's identity text does not equal the parent's member: an identity check against 12345 fails here.
+    const identity: Target = { scope: accountsScope, strategies: [{ kind: 'text', text: { source: 'literal', value: '67890' } }] };
+    expect(await adapter.checkCondition({ kind: 'text_equals', target: identity, expected: { source: 'literal', value: '12345' } }, {})).toBe(false);
   });
 });
 

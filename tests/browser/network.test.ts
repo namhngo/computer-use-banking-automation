@@ -84,8 +84,8 @@ beforeEach(async () => {
   policy = parsePolicy({
     ...rootPolicy,
     allowedOrigins: [app.origin, other.origin],
-    requests: rootPolicy.requests.filter((rule) =>
-      ['/login', '/members/search', '/members/:memberId', '/logout'].includes(rule.path)),
+    pages: rootPolicy.pages.filter((rule) => ['/login', '/members/search', '/members/:id'].includes(rule.path)),
+    forms: rootPolicy.forms.filter((rule) => ['/login', '/members/search', '/logout'].includes(rule.path)),
   });
   await startBrowser();
 });

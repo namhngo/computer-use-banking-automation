@@ -12,11 +12,9 @@ import { parseReplayResult } from '../artifact/result.js';
 import type { ReplayResult } from '../artifact/result.js';
 import { capabilityKeySchema } from '../artifact/schema.js';
 import { readConfig } from '../config.js';
-import { InterventionBroker } from '../hitl/interventions.js';
-import { startHitlServer } from '../hitl/server.js';
-import { loadPolicy, parsePolicy } from '../policy/policy.js';
+import { openOperatorConsole, parseHitlFlags } from '../hitl/cli.js';
+import { loadPolicy, parsePolicy, policyApp } from '../policy/policy.js';
 import { runReplay } from '../replay/engine.js';
-import { harborApp } from '../surface/harbor-profile.js';
 
 let result: ReplayResult;
 let setupCode = 'CLI_INVALID';
@@ -50,20 +48,15 @@ try {
   const fault = mockFaultSchema.parse(values.fault);
   if ((mode !== 'replay' && mode !== 'verification') || values.inputs === undefined
     || (!values.sandbox && (mode === 'verification' || fault !== 'none'))
-    || !values.policy || !values['evidence-root'] || !values.registry
-    || !/^[0-9]{1,5}$/.test(values['hitl-port']) || !/^[0-9]{4,7}$/.test(values['hitl-wait-ms'])
-    || (!values.hitl && supplied.has('hitl-port')) || (!values.hitl && supplied.has('hitl-wait-ms'))) throw new Error();
-  const hitlPort = Number(values['hitl-port']);
-  const hitlWaitMs = Number(values['hitl-wait-ms']);
-  if (hitlPort > 65535 || hitlWaitMs < 1000 || hitlWaitMs > 3_600_000) throw new Error();
+    || !values.policy || !values['evidence-root'] || !values.registry) throw new Error();
+  const hitlFlags = parseHitlFlags(values, supplied);
 
-  let key: ReturnType<typeof capabilityKeySchema.parse> | undefined;
   if (values.artifact !== undefined) {
     if (!values.artifact || positionals.length !== 0 || values.version !== undefined) throw new Error();
-  } else {
-    if (positionals.length !== 1 || !values.version || !/^[0-9]+$/.test(values.version)) throw new Error();
-    key = capabilityKeySchema.parse({ ...harborApp, name: positionals[0], version: Number(values.version) });
-  }
+  } else if (positionals.length !== 1 || !values.version || !/^[0-9]+$/.test(values.version)) throw new Error();
+  const basePolicy = await loadPolicy(values.policy);
+  const key = values.artifact !== undefined ? undefined
+    : capabilityKeySchema.parse({ ...policyApp(basePolicy), name: positionals[0], version: Number(values.version) });
 
   const inputs = JSON.parse(values.inputs) as unknown;
   let artifact: unknown;
@@ -87,7 +80,7 @@ try {
       await file.close();
     }
   } else {
-    artifact = await new FileCapabilityRegistry(values.registry).load(key);
+    artifact = await new FileCapabilityRegistry(values.registry).load(key!);
   }
 
   setupCode = 'CONFIG_ERROR';
@@ -96,25 +89,11 @@ try {
   // A handoff needs a browser the operator can see; refusing headless here avoids a pause nobody can act on.
   if (values.hitl && config.headless) throw new Error();
   let origin = new URL(config.targetUrl).origin;
-  let policy = await loadPolicy(values.policy);
+  let policy = basePolicy;
   let server: ReturnType<typeof serve> | undefined;
-  let hitlServer: Awaited<ReturnType<typeof startHitlServer>> | undefined;
-  let hitl: Parameters<typeof runReplay>[0]['hitl'];
+  let console: Awaited<ReturnType<typeof openOperatorConsole>> | undefined;
   try {
-    if (values.hitl) {
-      const token = InterventionBroker.generateToken();
-      const broker = new InterventionBroker(token, {
-        onOpen: (view) => {
-          process.stderr.write(`[hitl] intervention ${view.id} opened at step ${view.stepId} (${view.reason}) on ${view.path}\n`
-            + `[hitl] claim:  curl -sS -X POST ${hitlServer?.origin ?? ''}/interventions/${view.id}/claim -H "Authorization: Bearer $HITL_TOKEN" -H "Content-Type: application/json" -d '{"operatorId":"<you>"}'\n`
-            + `[hitl] resume: curl -sS -X POST ${hitlServer?.origin ?? ''}/interventions/${view.id}/resume -H "Authorization: Bearer $HITL_TOKEN" -H "Content-Type: application/json" -d '{"operatorId":"<you>","action":"retry_step"}'\n`);
-        },
-      });
-      hitlServer = await startHitlServer({ broker, port: hitlPort });
-      // The token appears once, on the operator's console only. It is never written to evidence.
-      process.stderr.write(`[hitl] operator endpoint ${hitlServer.origin}\n[hitl] export HITL_TOKEN=${token}\n`);
-      hitl = { broker, maxWaitMs: hitlWaitMs };
-    }
+    if (hitlFlags) console = await openOperatorConsole(hitlFlags);
     if (values.sandbox) {
       const { app } = createMockApp({ credentials, fault });
       server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
@@ -126,10 +105,10 @@ try {
     }
     result = await runReplay({
       artifact, inputs, mode, origin, policy, credentials,
-      evidenceRoot: values['evidence-root'], headless: config.headless, ...(hitl === undefined ? {} : { hitl }),
+      evidenceRoot: values['evidence-root'], headless: config.headless, ...(console === undefined ? {} : { hitl: console.hitl }),
     });
   } finally {
-    await hitlServer?.close().catch(() => {});
+    await console?.close();
     if (server?.listening) {
       const ownedServer = server;
       const closing = new Promise<void>((resolve, reject) => {

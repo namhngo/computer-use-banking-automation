@@ -10,7 +10,15 @@ vi.mock('ai', { spy: true });
 type GenerateResult = Awaited<ReturnType<MockLanguageModelV4['doGenerate']>>;
 const signal = () => new AbortController().signal;
 const privateValue = 'private-test-key-98';
-const ready = { status: 'ready', memberId: '12345' };
+const spec = {
+  name: 'get_member_savings_balance', description: 'Read the savings balance and currency for a member.',
+  inputs: { memberId: { value: '12345', description: 'Member identifier.' } },
+  outputs: {
+    savingsBalanceCents: { parser: 'usd_cents', description: 'Savings balance in cents.', sensitive: true },
+    currency: { parser: 'text', description: 'Currency code.', sensitive: false },
+  },
+} as const;
+const ready = { status: 'ready', goal: spec };
 const click = { ref: 'e1_2', reason: 'inspect_state' };
 const mockReceipt = { usage: { inputTokens: 12, outputTokens: 7 }, modelId: 'served-model-v1', responseId: 'response-1' };
 
@@ -76,7 +84,7 @@ describe('createDiscoveryModel', () => {
   });
 
   it('returns all valid intent statuses without heuristics or conversation carryover', async () => {
-    const values = [ready, { status: 'clarify', memberId: null }, { status: 'unsupported', memberId: null }];
+    const values = [ready, { status: 'clarify', goal: null }, { status: 'unsupported', goal: null }];
     const sdk = new MockLanguageModelV4({ doGenerate: values.map((value) => response([toolCall('plan_goal', value)])) });
     const client = createDiscoveryModel({ model: sdk, modelId: 'neutral-model', provider: 'neutral', source: 'test' });
     for (const value of values) {
@@ -90,19 +98,20 @@ describe('createDiscoveryModel', () => {
     const decisions = [
       ['fill', { ref: 'e1_1', input: 'memberId', reason: 'enter_input' }],
       ['click', click],
-      ['extract', { ref: 'e1_3', field: 'currency', reason: 'read_value' }],
+      ['extract', { ref: 'e1_3', name: 'currency', reason: 'read_value' }],
+      ['extract', { ref: 'e1_3', name: 'memberId', reason: 'read_value' }],
       ['navigate', { path: '/observed', reason: 'locate_record' }],
       ['wait', { ms: 50, reason: 'wait_for_ui' }],
-      ['complete', { outcome: 'success', ref: null, reason: 'confirm_completion' }],
+      ['complete', { outcome: 'success', code: null, ref: null, reason: 'confirm_completion' }],
       // A live model attaches the evidence ref to a success claim; the engine ignores it.
-      ['complete', { outcome: 'success', ref: 'e1_3', reason: 'confirm_completion' }],
-      ['complete', { outcome: 'member_not_found', ref: 'e1_4', reason: 'confirm_completion' }],
+      ['complete', { outcome: 'success', code: null, ref: 'e1_3', reason: 'confirm_completion' }],
+      ['complete', { outcome: 'business_outcome', code: 'MEMBER_NOT_FOUND', ref: 'e1_4', reason: 'confirm_completion' }],
       ['request_human', { code: 'stuck', reason: 'ask_human' }],
     ] as const;
     const context = { observation: { refs: [{ ref: 'e1_2', role: 'button', name: 'Observed control' }] } };
     for (const [name, input] of decisions) {
       const { sdk, client } = setup(response([toolCall(name, input)]));
-      expect((await client.decide(context, signal())).value).toEqual({ tool: name, input });
+      expect((await client.decide(spec, context, signal())).value).toEqual({ tool: name, input });
       expect(sdk.doGenerateCalls).toHaveLength(1);
       expect(sdk.doGenerateCalls[0]).toMatchObject({ toolChoice: { type: 'required' } });
     }
@@ -117,11 +126,12 @@ describe('createDiscoveryModel', () => {
 
   it('keeps prompts observational and contains no application recipe or source access', async () => {
     const { sdk, client } = setup();
-    await client.decide({ observation: { refs: [] } }, signal());
+    await client.decide(spec, { observation: { refs: [] } }, signal());
     const captured = JSON.stringify(sdk.doGenerateCalls[0]?.prompt);
-    expect(PROMPT_VERSION).toBe(1);
+    expect(PROMPT_VERSION).toBe(2);
     expect(sdk.doGenerateCalls[0]?.prompt[0]).toEqual({ role: 'system', content: DISCOVERY_INSTRUCTIONS });
-    expect(DISCOVERY_INSTRUCTIONS).toMatch(/main document.*frame/);
+    expect(DISCOVERY_INSTRUCTIONS).toMatch(/extract every declared input from the page or frame that displays the outputs/);
+    expect(`${INTENT_INSTRUCTIONS}\n${DISCOVERY_INSTRUCTIONS}`).not.toMatch(/\bsavings\b|\bbalance\b|\bmember\b/i);
     expect(DISCOVERY_INSTRUCTIONS).toMatch(/actual successful extracts/);
     expect(captured).not.toMatch(/Harbor|data-testid|querySelector|\/members|\/accounts|mock-app|\.html|\.tsx|Step [0-9]|first click|then click/i);
     const source = readFileSync(new URL('./model.ts', import.meta.url), 'utf8');
@@ -131,7 +141,7 @@ describe('createDiscoveryModel', () => {
   it('rejects zero, multiple, and unknown calls rather than choosing one', async () => {
     for (const content of [[], [toolCall('click', click), toolCall('click', click)], [toolCall('undeclared', {})]]) {
       const { sdk, client } = setup(response(content));
-      await expect(client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
+      await expect(client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
       expect(sdk.doGenerateCalls).toHaveLength(1);
     }
   });
@@ -141,15 +151,22 @@ describe('createDiscoveryModel', () => {
       toolCall('fill', { ref: 'e1_1', input: 'password', reason: 'enter_input' }),
       toolCall('click', { ...click, selector: '#invented' }),
       toolCall('click', { ...click, ref: 'invented' }),
-      toolCall('complete', { outcome: 'member_not_found', ref: null, reason: 'confirm_completion' }),
+      toolCall('complete', { outcome: 'business_outcome', code: 'MEMBER_NOT_FOUND', ref: null, reason: 'confirm_completion' }),
+      toolCall('complete', { outcome: 'business_outcome', code: null, ref: 'e1_4', reason: 'confirm_completion' }),
+      toolCall('complete', { outcome: 'success', code: 'DONE', ref: null, reason: 'confirm_completion' }),
+      toolCall('extract', { ref: 'e1_3', name: 'checkingBalance', reason: 'read_value' }),
+      toolCall('fill', { ref: 'e1_1', input: 'currency', reason: 'enter_input' }),
       { type: 'tool-call', toolCallId: 'bad-json', toolName: 'click', input: '{' } as const,
     ];
     for (const content of invalid) {
-      await expect(setup(response([content])).client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
+      await expect(setup(response([content])).client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
     }
     for (const content of [
-      toolCall('plan_goal', { status: 'ready', memberId: null }),
-      toolCall('plan_goal', { status: 'clarify', memberId: '12345' }),
+      toolCall('plan_goal', { status: 'ready', goal: null }),
+      toolCall('plan_goal', { status: 'clarify', goal: spec }),
+      toolCall('plan_goal', { status: 'ready', goal: { ...spec, outputs: {} } }),
+      toolCall('plan_goal', { status: 'ready', goal: { ...spec, inputs: { savingsBalanceCents: spec.inputs.memberId } } }),
+      toolCall('plan_goal', { status: 'ready', goal: { ...spec, name: 'Get Balance' } }),
       toolCall('plan_goal', { ...ready, plan: ['invented'] }),
       toolCall('click', click),
     ]) {
@@ -161,7 +178,7 @@ describe('createDiscoveryModel', () => {
     for (const unified of ['length', 'content-filter', 'error', 'other', 'stop'] as const) {
       const result = response();
       result.finishReason = { unified, raw: privateValue };
-      await expect(setup(result).client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
+      await expect(setup(result).client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
     }
   });
 
@@ -173,7 +190,7 @@ describe('createDiscoveryModel', () => {
       [{ ...call, providerExecuted: true } as GenerateResult['content'][number]],
     ];
     for (const content of contents) {
-      await expect(setup(response(content)).client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
+      await expect(setup(response(content)).client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
     }
   });
 
@@ -182,13 +199,13 @@ describe('createDiscoveryModel', () => {
       for (const total of [undefined, -1, 1.5, Infinity, NaN]) {
         const result = response();
         result.usage[field].total = total;
-        await expect(setup(result).client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: undefined });
+        await expect(setup(result).client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: undefined });
       }
     }
     const result = response();
     result.usage.inputTokens.total = 0;
     result.usage.outputTokens.total = 0;
-    expect((await setup(result).client.decide({}, signal())).usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+    expect((await setup(result).client.decide(spec, {}, signal())).usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 
   it('requires bounded served model metadata and does not invent absent response IDs', async () => {
@@ -202,11 +219,11 @@ describe('createDiscoveryModel', () => {
         usage: mockReceipt.usage,
         ...(metadata.modelId === 'served' ? { modelId: 'served' } : {}),
       };
-      await expect(setup(result).client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: expected });
+      await expect(setup(result).client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: expected });
     }
     const result = response();
     result.response = { modelId: 'served-without-id' };
-    expect(await setup(result).client.decide({}, signal())).toEqual({
+    expect(await setup(result).client.decide(spec, {}, signal())).toEqual({
       value: { tool: 'click', input: click }, usage: { inputTokens: 12, outputTokens: 7 }, modelId: 'served-without-id',
     });
   });
@@ -214,15 +231,15 @@ describe('createDiscoveryModel', () => {
   it('scrubs known secrets from served metadata and rejects them in decisions', async () => {
     const result = response();
     result.response = { modelId: `served-${privateValue}`, id: `response-${Buffer.from(privateValue).toString('base64url')}` };
-    expect(await setup(result, [privateValue]).client.decide({}, signal())).toMatchObject({
+    expect(await setup(result, [privateValue]).client.decide(spec, {}, signal())).toMatchObject({
       modelId: '[REDACTED]', responseId: '[REDACTED]',
     });
     result.finishReason = { unified: 'length', raw: 'max_output_tokens' };
-    await expect(setup(result, [privateValue]).client.decide({}, signal())).rejects.toMatchObject({
+    await expect(setup(result, [privateValue]).client.decide(spec, {}, signal())).rejects.toMatchObject({
       receipt: { usage: mockReceipt.usage, modelId: '[REDACTED]', responseId: '[REDACTED]' },
     });
     const unsafe = response([toolCall('navigate', { path: `/${privateValue}`, reason: 'inspect_state' })]);
-    await expect(setup(unsafe, [privateValue]).client.decide({}, signal())).rejects.toThrow('Discovery model call failed.');
+    await expect(setup(unsafe, [privateValue]).client.decide(spec, {}, signal())).rejects.toThrow('Discovery model call failed.');
   });
 
   it('blocks raw and encoded API or UI secrets in goals and nested context before any call', async () => {
@@ -240,7 +257,7 @@ describe('createDiscoveryModel', () => {
         JSON.stringify(encodeURIComponent(Buffer.from(secret).toString('base64'))),
       ];
       for (const form of forms) {
-        await expect(client.decide({ observation: [{ text: form }] }, signal())).rejects.toThrow('Discovery model call failed.');
+        await expect(client.decide(spec, { observation: [{ text: form }] }, signal())).rejects.toThrow('Discovery model call failed.');
         await expect(client.intent(`Read savings ${form}`, signal())).rejects.toThrow('Discovery model call failed.');
       }
     }
@@ -253,7 +270,7 @@ describe('createDiscoveryModel', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     for (const context of [undefined, circular, { toJSON: () => { throw new Error(privateValue); } }]) {
-      await expect(client.decide(context, signal())).rejects.toThrow('Discovery model call failed.');
+      await expect(client.decide(spec, context, signal())).rejects.toThrow('Discovery model call failed.');
     }
     expect(sdk.doGenerateCalls).toHaveLength(0);
   });
@@ -262,14 +279,14 @@ describe('createDiscoveryModel', () => {
     const sdk = new MockLanguageModelV4({ doGenerate: () => { throw new Error(`Private response ${privateValue}`); } });
     const client = createDiscoveryModel({ model: sdk, modelId: 'model', provider: 'provider', source: 'live', secretValues: [privateValue] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const error = await client.decide({}, signal()).catch((error: unknown) => error);
+    const error = await client.decide(spec, {}, signal()).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(ModelCallError);
     expect(error).toMatchObject({ message: 'Discovery model call failed.', receipt: undefined });
     expect(error).not.toHaveProperty('cause');
     expect(sdk.doGenerateCalls).toHaveLength(1);
     const result = response();
     result.warnings = [{ type: 'other', message: privateValue }];
-    await expect(setup(result).client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
+    await expect(setup(result).client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -277,7 +294,7 @@ describe('createDiscoveryModel', () => {
     const controller = new AbortController();
     controller.abort(new Error(privateValue));
     const { sdk, client } = setup();
-    await expect(client.decide({}, controller.signal)).rejects.toMatchObject({ name: 'ModelCallError', receipt: undefined });
+    await expect(client.decide(spec, {}, controller.signal)).rejects.toMatchObject({ name: 'ModelCallError', receipt: undefined });
     expect(sdk.doGenerateCalls).toHaveLength(0);
     const inFlight = new AbortController();
     const cancelingSdk = new MockLanguageModelV4({ doGenerate: (options) => {
@@ -287,7 +304,7 @@ describe('createDiscoveryModel', () => {
       return Promise.resolve(response());
     } });
     const cancelingClient = createDiscoveryModel({ model: cancelingSdk, modelId: 'model', provider: 'provider', source: 'test' });
-    await expect(cancelingClient.decide({}, inFlight.signal)).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
+    await expect(cancelingClient.decide(spec, {}, inFlight.signal)).rejects.toMatchObject({ name: 'ModelCallError', receipt: mockReceipt });
     expect(cancelingSdk.doGenerateCalls).toHaveLength(1);
   });
 });
@@ -349,7 +366,7 @@ describe('readDiscoveryModel', () => {
     }, { status: 503 }));
     vi.stubGlobal('fetch', fetch);
     const client = readDiscoveryModel({ OPENAI_API_KEY: privateValue });
-    const error = await client.decide({}, signal()).catch((error: unknown) => error);
+    const error = await client.decide(spec, {}, signal()).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(ModelCallError);
     expect(error).toMatchObject({ message: 'Discovery model call failed.', receipt: undefined });
     expect(error).not.toHaveProperty('cause');
@@ -382,7 +399,7 @@ describe('readDiscoveryModel', () => {
     ];
     for (const body of rejected) {
       fetch.mockResolvedValueOnce(Response.json(body));
-      const error = await client.decide({}, signal()).then((reply) => { dispatch(reply); }).catch((error: unknown) => error);
+      const error = await client.decide(spec, {}, signal()).then((reply) => { dispatch(reply); }).catch((error: unknown) => error);
       expect(error).toBeInstanceOf(ModelCallError);
       expect(error).toMatchObject({ message: 'Discovery model call failed.', receipt: body.status === 'in_progress' || body.status === undefined ? undefined : {
         usage: { inputTokens: 21, outputTokens: 9 }, modelId: base.model, responseId: base.id,
@@ -407,9 +424,9 @@ describe('readDiscoveryModel', () => {
       .mockRejectedValueOnce(new Error(privateValue));
     vi.stubGlobal('fetch', fetch);
     const client = readDiscoveryModel({ OPENAI_API_KEY: privateValue });
-    const first = client.decide({}, signal()).catch((error: unknown) => error);
+    const first = client.decide(spec, {}, signal()).catch((error: unknown) => error);
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
-    expect(await client.decide({}, signal())).toMatchObject({
+    expect(await client.decide(spec, {}, signal())).toMatchObject({
       modelId: 'gpt-4.1-mini', responseId: 'resp-second', usage: { inputTokens: 4, outputTokens: 2 },
     });
     release?.(Response.json({
@@ -419,7 +436,7 @@ describe('readDiscoveryModel', () => {
     expect(await first).toMatchObject({ name: 'ModelCallError', receipt: {
       modelId: '[REDACTED]', responseId: '[REDACTED]', usage: { inputTokens: 17, outputTokens: 3 },
     } });
-    await expect(client.decide({}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: undefined });
+    await expect(client.decide(spec, {}, signal())).rejects.toMatchObject({ name: 'ModelCallError', receipt: undefined });
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 });

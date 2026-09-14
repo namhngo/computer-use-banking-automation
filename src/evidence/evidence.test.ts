@@ -7,7 +7,7 @@ import { EvidenceSink, type SafeSnapshot } from './evidence.js';
 function snapshot(): SafeSnapshot {
   return {
     frames: [{
-      index: 0, allowed: true, path: '/members/:memberId/accounts', truncated: false,
+      index: 0, allowed: true, path: '/members/:id/accounts', truncated: false,
       nodes: [{ tag: 'input', role: 'textbox', visible: true, childCount: 0, textPresent: false, valuePresent: true }],
     }],
   };
@@ -30,7 +30,7 @@ describe('EvidenceSink', () => {
       id: 'iv_1', runId: 'run_hitl', stepId: 'open_search', reason: 'UNEXPECTED_DIALOG', path: '/notice' as const,
       createdAt: '2026-09-12T20:00:00.000Z', closedAt: '2026-09-12T20:01:00.000Z', state: 'resumed' as const, operatorId: 'alice',
       transitions: [{ state: 'waiting' as const, at: '2026-09-12T20:00:00.000Z' }, { state: 'resumed' as const, at: '2026-09-12T20:01:00.000Z', code: 'RETRY' }],
-      humanActions: [{ action: 'submit', targetKey: 'operator_notice_acknowledge', outcome: 'allowed', path: '/notice' as const, at: '2026-09-12T20:00:30.000Z' }],
+      humanActions: [{ action: 'submit', effect: 'submit', outcome: 'allowed', path: '/notice' as const, at: '2026-09-12T20:00:30.000Z' }],
     };
     expect(await sink.intervention(record)).toBe('intervention_1.json');
     expect(sink.files).toEqual(['events.jsonl', 'intervention_1.json']);
@@ -57,7 +57,7 @@ describe('EvidenceSink', () => {
     expect(await readFile(join(sink.directory, 'events.jsonl'), 'utf8')).toBe('');
     const writes = Array.from({ length: 100 }, (_, strategyIndex) => sink.event({
       type: 'STEP_ATTEMPT', phase: 'replay', stepId: 'open_accounts', action: 'click',
-      targetKey: 'accountsTab', strategyIndex, code: 'SUCCESS', attempt: 1,
+      effect: 'navigate', strategyIndex, code: 'SUCCESS', attempt: 1,
       outcome: 'completed', durationMs: 0.25,
     }));
     await sink.close();
@@ -69,7 +69,7 @@ describe('EvidenceSink', () => {
     for (const [index, event] of events.entries()) {
       expect(event).toEqual({
         type: 'STEP_ATTEMPT', phase: 'replay', stepId: 'open_accounts', action: 'click',
-        targetKey: 'accountsTab', strategyIndex: index, code: 'SUCCESS', attempt: 1,
+        effect: 'navigate', strategyIndex: index, code: 'SUCCESS', attempt: 1,
         outcome: 'completed', durationMs: 0.25, runId: 'run_123', ts: expect.any(String) as unknown,
       });
       expect(new Date(event.ts as string).toISOString()).toBe(event.ts);
@@ -95,7 +95,7 @@ describe('EvidenceSink', () => {
     { type: '' }, { type: 'contains private text' }, { type: 'https://private.test' },
     { type: 'line\nbreak' }, { type: 'a'.repeat(65) }, { type: '12345' },
     { type: 'ok', phase: null }, { type: 'ok', stepId: {} },
-    { type: 'ok', action: 'click/private' }, { type: 'ok', targetKey: 'member@private.test' },
+    { type: 'ok', action: 'click/private' }, { type: 'ok', effect: 'member@private.test' },
     { type: 'ok', code: 'private-error!' }, { type: 'ok', outcome: 'not complete' },
     { type: 'ok', strategyIndex: -1 }, { type: 'ok', strategyIndex: 0.1 },
     { type: 'ok', strategyIndex: Number.MAX_SAFE_INTEGER + 1 },
@@ -126,9 +126,14 @@ describe('EvidenceSink', () => {
     for (const secret of secrets) expect(log + structural).not.toContain(secret);
     expect(JSON.parse(log)).toMatchObject({ runId: '[REDACTED]', stepId: '[REDACTED]_[REDACTED]' });
     expect(JSON.parse(structural)).toEqual({ frames: [{
-      ...snapshot().frames[0], path: '[unavailable]',
+      ...snapshot().frames[0],
       nodes: [{ ...snapshot().frames[0]!.nodes[0], tag: 'other', role: 'other' }],
     }] });
+    // A path that happens to contain a sensitive token is replaced by a spelling evidence can still hold.
+    const leaky = await EvidenceSink.create({ root, runId: 'leakyRun', sensitiveValues: ['accounts'] });
+    const leakyFile = await leaky.snapshot(snapshot());
+    await leaky.close();
+    expect((JSON.parse(await readFile(join(leaky.directory, leakyFile), 'utf8')) as SafeSnapshot).frames[0]?.path).toBe('[unavailable]');
   });
 
   it('rejects raw and commonly encoded secrets in text-bearing fields before persistence', async () => {
@@ -205,7 +210,7 @@ describe('EvidenceSink', () => {
   it.each([
     { path: '/members/12345' }, { path: '/members/12345/accounts' },
     { path: 'http://localhost/login' }, { path: '/login?password=private-secret' },
-    { path: '/login#private-secret' }, { path: '/unknown' }, { path: '/members/%3AmemberId' },
+    { path: '/login#private-secret' }, { path: '/members/00042/accounts' }, { path: '/members/%3Aid' }, { path: '/members/:memberId' },
     { index: -1 }, { index: 0.5 }, { allowed: 'true' }, { truncated: null },
     { text: 'private-secret' }, { url: 'http://private.test' },
   ])('rejects unsafe or malformed snapshot frames %#', async (fields) => {
@@ -231,7 +236,7 @@ describe('EvidenceSink', () => {
 
   it('accepts all canonical paths and maximum bounded structural data', async () => {
     const sink = await EvidenceSink.create({ root, runId: 'run' });
-    const paths = ['/', '/login', '/members/search', '/members/:memberId', '/members/:memberId/accounts', '/notice', '[blocked]', '[unavailable]'];
+    const paths = ['/', '/login', '/members/search', '/members/:id', '/members/:id/accounts', '/notice', '[blocked]', '[unavailable]'];
     const input = { frames: Array.from({ length: 10 }, (_, index) => ({
       ...snapshot().frames[0]!, index, allowed: index < 6, path: paths[index % paths.length]!, truncated: true,
       nodes: Array.from({ length: 300 }, (_, nodeIndex) => ({
